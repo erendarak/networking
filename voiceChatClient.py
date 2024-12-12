@@ -104,16 +104,16 @@ def audio_streaming(client):
             mixed_samples = []
             for i in range(Chunks):
                 s_sum = 0
-                count = 0
                 for arr in sample_arrays:
                     s_sum += arr[i]
-                    count += 1
-                mixed_value = int(s_sum / count)
-                if mixed_value > 32767:
-                    mixed_value = 32767
-                elif mixed_value < -32768:
-                    mixed_value = -32768
-                mixed_samples.append(mixed_value)
+
+                # Amplify the mixed signal
+                amplified_value = int(s_sum * 1.5)  # Amplification factor: 1.5
+                if amplified_value > 32767:
+                    amplified_value = 32767
+                elif amplified_value < -32768:
+                    amplified_value = -32768
+                mixed_samples.append(amplified_value)
 
             mixed_data = struct.pack('<' + ('h' * Chunks), *mixed_samples)
             output_stream.write(mixed_data)
