@@ -9,9 +9,8 @@ server = socket.socket()
 server.bind((host, port))
 server.listen(5)
 
-# rooms = { "roomName": [ (conn, client_id), ... ] }
 rooms = {}
-room_id_counters = {}  # Her oda için ID sayacı
+room_id_counters = {}
 
 def start():
     print("Server started, waiting for connections...")
@@ -50,7 +49,10 @@ def handle_new_connection(conn):
             room_choice = new_room_name
 
         if room_choice not in rooms:
-            conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            if room_choice == "":
+                conn.send(b"No room chosen. Disconnecting.\n")
+            else:
+                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
             conn.close()
             return
 

@@ -5,20 +5,25 @@ import sys
 import struct
 from collections import defaultdict
 from queue import Queue
+import numpy as np
+import webrtcvad
 
 host = "35.158.171.58"
 port = 5000
 
 Format = pyaudio.paInt16
-Chunks = 4096
+Chunks = 1024  # Smaller chunk size for lower latency
 Channels = 1
 Rate = 44100
 
-packet_size = 2 + (Chunks * 2)  # 2 byte ID + 8192 byte ses
+packet_size = 2 + (Chunks * 2)  # 2 bytes ID + audio data
 silence = bytes([0] * (Chunks * 2))
 
 stop_audio_threads = False
 sources = defaultdict(Queue)
+
+vad = webrtcvad.Vad()
+vad.set_mode(3)  # Aggressive VAD mode
 
 def connect_to_server():
     client = socket.socket()
@@ -28,6 +33,7 @@ def connect_to_server():
 
 def choose_room(client):
     while True:
+        print("---------- Main Menu ----------")
         choice = input("Type an existing room name to join, 'NEW:<RoomName>' to create a new room, or 'q' to quit: ").strip()
         if choice.lower() == 'q':
             client.close()
@@ -61,8 +67,10 @@ def audio_streaming(client):
         while not stop_audio_threads:
             try:
                 data = input_stream.read(Chunks, exception_on_overflow=False)
-                client.send(data)
-            except:
+                if vad.is_speech(data, Rate):  # Send only if speech is detected
+                    client.send(data)
+            except Exception as e:
+                print("Send audio error:", e)
                 break
 
     def receive_audio():
@@ -78,7 +86,8 @@ def audio_streaming(client):
                     audio_data = buf[2:]
                     sources[sender_id].put(audio_data)
                     buf = b""
-            except:
+            except Exception as e:
+                print("Receive audio error:", e)
                 break
 
     def mixer_thread():
@@ -88,39 +97,15 @@ def audio_streaming(client):
                 time.sleep(0.01)
                 continue
 
-            buffers = []
+            mix = np.zeros(Chunks, dtype=np.int16)
             for sid, q in list(sources.items()):
                 if not q.empty():
-                    buffers.append(q.get())
-                else:
-                    buffers.append(silence)
+                    audio_data = q.get()
+                    audio_np = np.frombuffer(audio_data, dtype=np.int16)
+                    mix = np.add(mix, audio_np, casting='safe')
 
-            sample_arrays = []
-            for buf in buffers:
-                samples = struct.unpack('<' + ('h' * Chunks), buf)
-                sample_arrays.append(samples)
-
-            mixed_samples = []
-            for i in range(Chunks):
-                s_sum = 0
-                count = 0
-                for arr in sample_arrays:
-                    if abs(arr[i]) > 500:  # Parazit filtresi
-                        s_sum += arr[i]
-                        count += 1
-                if count > 0:
-                    mixed_value = int(s_sum / count)  # Dinamik normalizasyon
-                else:
-                    mixed_value = 0
-
-                if mixed_value > 32767:
-                    mixed_value = 32767
-                elif mixed_value < -32768:
-                    mixed_value = -32768
-                mixed_samples.append(mixed_value)
-
-            mixed_data = struct.pack('<' + ('h' * Chunks), *mixed_samples)
-            output_stream.write(mixed_data)
+            mix = np.clip(mix, -32768, 32767)  # Prevent overflow
+            output_stream.write(mix.tobytes())
 
     t_send = threading.Thread(target=send_audio)
     t_recv = threading.Thread(target=receive_audio)
