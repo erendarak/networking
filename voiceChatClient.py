@@ -2,8 +2,11 @@ import socket
 import threading
 import pyaudio
 import sys
+import struct
+from collections import defaultdict
+from queue import Queue
 
-host = "18.197.204.63"
+host = "35.158.171.58"
 port = 5000
 
 Format = pyaudio.paInt16
@@ -15,6 +18,10 @@ Rate = 44100
 stop_audio_threads = False
 stop_input_thread = False
 
+# Her kaynaktan gelen veriyi tutacak yapılar
+# sources = { id: Queue() }
+sources = defaultdict(Queue)
+
 def connect_to_server():
     """Connects to the server and returns the socket and the welcome message."""
     client = socket.socket()
@@ -23,27 +30,10 @@ def connect_to_server():
     return client, welcome_message
 
 def choose_room(client):
-    """
-    Interactively choose or create a room.
-    If an invalid choice is made, re-try until a valid one.
-    Returns True if a room was successfully joined, False otherwise.
-    """
     while True:
         print("---------- Main Menu ----------")
-        # Server has already sent the welcome message listing available rooms
-        # Re-fetch the server message since after leaving we re-connected
-        # (This is handled outside and passed here)
-        # Actually, we need to re-receive it if we want a refreshed list.
-        # Let's assume the server sends us a fresh menu each connection.
-        # If we need a refreshed list after leaving, we can rely on re-connecting.
-
-        # By the time we get here, we've received the welcome_message in main().
-        # It's in a variable accessible to choose_room.
-
-        # Ask the user to input a room choice or NEW:RoomName
         choice = input("Type an existing room name to join, 'NEW:<RoomName>' to create a new room, or 'q' to quit: ").strip()
         if choice.lower() == 'q':
-            # User wants to quit the application
             client.close()
             sys.exit(0)
 
@@ -51,35 +41,18 @@ def choose_room(client):
         response = client.recv(4096).decode('utf-8')
         print(response)
 
-        # Check if successfully joined a room
         if "Joined room:" in response:
             return True
         elif "Invalid" in response or "does not exist" in response or "No room chosen" in response:
-            # Invalid choice, the server disconnected? According to the server code, it might disconnect.
-            # If the server disconnects on error, we must reconnect.
-            # Let's handle the scenario: if response indicates disconnect,
-            # re-connect and start over.
             if "Disconnecting" in response:
                 client.close()
                 return False
-            # Otherwise, just loop and ask again since we remain connected.
         elif "No rooms available" in response:
-            # User can choose NEW:... or try again.
-            # The server still awaits a valid choice, so just loop again.
-            pass
-        else:
-            # If we get here, maybe the response is unexpected.
-            # Just loop again and try.
             pass
 
 def audio_streaming(client):
-    """
-    Handles sending and receiving audio data.
-    Also starts a separate thread to listen for 'leave' command from the user.
-    When 'leave' is typed, streaming stops and we return to the main menu.
-    """
     global stop_audio_threads
-    stop_audio_threads = False  # Reset flag
+    stop_audio_threads = False
 
     p = pyaudio.PyAudio()
     input_stream = p.open(format=Format,
@@ -103,24 +76,79 @@ def audio_streaming(client):
                 break
 
     def receive_audio():
+        # Bu thread her gelen paketi alır:
+        # Packet format: 2 byte ID + 4096 byte audio
+        packet_size = 2 + Chunks
+        buf = b""
         while not stop_audio_threads:
             try:
-                data = client.recv(Chunks)
-                if not data:
+                chunk = client.recv(packet_size - len(buf))
+                if not chunk:
                     break
-                output_stream.write(data)
+                buf += chunk
+                if len(buf) == packet_size:
+                    # Paket tamam
+                    # İlk 2 byte ID, kalan 4096 byte ses
+                    sender_id = struct.unpack('>H', buf[:2])[0]
+                    audio_data = buf[2:]
+                    # audio_data: 4096 byte
+                    # Kaynak kuyruğuna ekle
+                    sources[sender_id].put(audio_data)
+                    buf = b""
             except:
                 break
 
+    def mixer_thread():
+        # Belirli aralıklarla tüm kaynaklardan veri çekip miksle
+        # Sessizlik = 4096 byte sıfır
+        silence = bytes([0]*(Chunks))
+        import time
+
+        while not stop_audio_threads:
+            # sources sözlüğündeki tüm ID'leri al
+            # Eğer hiçbir source yoksa bekle
+            if len(sources) == 0:
+                time.sleep(0.01)
+                continue
+
+            # Her kaynaktan 4096 byte çek veya sessizlik
+            buffers = []
+            for sid, q in list(sources.items()):
+                if not q.empty():
+                    buffers.append(q.get())
+                else:
+                    buffers.append(silence)
+
+            # buffers şimdi birden çok kaynağın 4096 byte'ını içeriyor
+            # Mix et (16-bit signed integer)
+            # Her buffers öğesini int16 array'e dönüştür
+            sample_arrays = []
+            for buf in buffers:
+                samples = struct.unpack('<' + ('h'*Chunks), buf)
+                sample_arrays.append(samples)
+
+            mixed_samples = []
+            for i in range(Chunks):
+                s_sum = 0
+                for arr in sample_arrays:
+                    s_sum += arr[i]
+                # Clamping
+                if s_sum > 32767:
+                    s_sum = 32767
+                elif s_sum < -32768:
+                    s_sum = -32768
+                mixed_samples.append(s_sum)
+
+            mixed_data = struct.pack('<' + ('h'*Chunks), *mixed_samples)
+            output_stream.write(mixed_data)
+
     def user_input():
-        global stop_audio_threads  # Indicate we are using the global variable
+        global stop_audio_threads
         while not stop_audio_threads:
             command = sys.stdin.readline().strip().lower()
             if command == "leave":
-                # User wants to leave the room, stop the audio threads
                 break
 
-        # Signal the audio threads to stop
         stop_audio_threads = True
         try:
             client.shutdown(socket.SHUT_RDWR)
@@ -128,19 +156,21 @@ def audio_streaming(client):
             pass
         client.close()
 
-    # Start threads for send, receive, and user input
     t_send = threading.Thread(target=send_audio)
     t_recv = threading.Thread(target=receive_audio)
+    t_mix = threading.Thread(target=mixer_thread)
     t_input = threading.Thread(target=user_input)
 
     t_send.start()
     t_recv.start()
+    t_mix.start()
     t_input.start()
 
     t_send.join()
     t_recv.join()
-    # user_input thread ends when stop_audio_threads is set to True
-    # or user_input ends after user types leave.
+    t_mix.join()
+    # t_input beklemeden de kapatılabilir.
+    # user_input thread sonlanınca buraya gelir.
 
     input_stream.stop_stream()
     input_stream.close()
@@ -150,22 +180,14 @@ def audio_streaming(client):
 
 def main():
     while True:
-        # Connect to the server and get the current room list
         client, welcome_message = connect_to_server()
         print(welcome_message)
 
-        # User chooses room or creates new one
         joined = choose_room(client)
         if not joined:
-            # If we failed to join a room (maybe user typed invalid input and server disconnected),
-            # just continue the loop, which reconnects and tries again.
             continue
 
-        # If joined successfully, start streaming
-        # The user can type "leave" at any time to go back to the menu
         audio_streaming(client)
-        # After user leaves, we end up here and the loop restarts
-        # letting the user choose a new room again.
 
 if __name__ == "__main__":
     main()
