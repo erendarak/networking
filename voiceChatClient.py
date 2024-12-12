@@ -10,20 +10,20 @@ host = "35.158.171.58"
 port = 5000
 
 Format = pyaudio.paInt16
-Chunks = 4096
+Chunks = 4096  # Örnek sayısı
 Channels = 1
 Rate = 44100
 
-# Global variables to control threads
+# Her örnek 2 byte, tek kanal olduğu için toplam byte sayısı = Chunks * 2
+packet_size = 2 + (Chunks * 2)  # 2 bayt ID + 8192 bayt ses = 8194 bayt
+silence = bytes([0]*(Chunks*2)) # 8192 bayt sessizlik
+
 stop_audio_threads = False
 stop_input_thread = False
 
-# Her kaynaktan gelen veriyi tutacak yapılar
-# sources = { id: Queue() }
 sources = defaultdict(Queue)
 
 def connect_to_server():
-    """Connects to the server and returns the socket and the welcome message."""
     client = socket.socket()
     client.connect((host, port))
     welcome_message = client.recv(4096).decode('utf-8')
@@ -70,15 +70,13 @@ def audio_streaming(client):
     def send_audio():
         while not stop_audio_threads:
             try:
+                # input_stream.read(Chunks) returns Chunks samples * 2 bytes = 8192 bytes
                 data = input_stream.read(Chunks, exception_on_overflow=False)
                 client.send(data)
             except:
                 break
 
     def receive_audio():
-        # Bu thread her gelen paketi alır:
-        # Packet format: 2 byte ID + 4096 byte audio
-        packet_size = 2 + Chunks
         buf = b""
         while not stop_audio_threads:
             try:
@@ -88,30 +86,21 @@ def audio_streaming(client):
                 buf += chunk
                 if len(buf) == packet_size:
                     # Paket tamam
-                    # İlk 2 byte ID, kalan 4096 byte ses
                     sender_id = struct.unpack('>H', buf[:2])[0]
-                    audio_data = buf[2:]
-                    # audio_data: 4096 byte
-                    # Kaynak kuyruğuna ekle
+                    audio_data = buf[2:]  # 8192 bayt
                     sources[sender_id].put(audio_data)
                     buf = b""
             except:
                 break
 
     def mixer_thread():
-        # Belirli aralıklarla tüm kaynaklardan veri çekip miksle
-        # Sessizlik = 4096 byte sıfır
-        silence = bytes([0]*(Chunks))
         import time
-
         while not stop_audio_threads:
-            # sources sözlüğündeki tüm ID'leri al
-            # Eğer hiçbir source yoksa bekle
             if len(sources) == 0:
                 time.sleep(0.01)
                 continue
 
-            # Her kaynaktan 4096 byte çek veya sessizlik
+            # Tüm kaynaklardan veri al, yoksa sessizlik kullan
             buffers = []
             for sid, q in list(sources.items()):
                 if not q.empty():
@@ -119,9 +108,7 @@ def audio_streaming(client):
                 else:
                     buffers.append(silence)
 
-            # buffers şimdi birden çok kaynağın 4096 byte'ını içeriyor
-            # Mix et (16-bit signed integer)
-            # Her buffers öğesini int16 array'e dönüştür
+            # buffers -> her biri 8192 bayt, 4096 örnek (int16)
             sample_arrays = []
             for buf in buffers:
                 samples = struct.unpack('<' + ('h'*Chunks), buf)
@@ -169,8 +156,6 @@ def audio_streaming(client):
     t_send.join()
     t_recv.join()
     t_mix.join()
-    # t_input beklemeden de kapatılabilir.
-    # user_input thread sonlanınca buraya gelir.
 
     input_stream.stop_stream()
     input_stream.close()
