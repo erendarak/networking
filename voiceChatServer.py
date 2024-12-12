@@ -1,6 +1,5 @@
 import socket
 import threading
-import queue
 import struct
 import time
 
@@ -11,14 +10,15 @@ server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind((host, port))
 server.listen(5)
 
-# Odalar için yapı
-rooms = {}  # { "RoomName": { "clients": [], "queues": {conn:Queue}, "mixing_thread":Thread, "stop_mixing":False } }
+rooms = {}  # { roomName: {"clients": [], "active_speaker": None, "silence_count": {conn: int}} }
 
 CHUNK = 4096
-SAMPLE_WIDTH = 2  # 16-bit ses
+SAMPLE_WIDTH = 2  # 16-bit PCM
 CHANNELS = 1
 RATE = 44100
 
+SILENCE_THRESHOLD = 50  # Max ortalama mutlak değer (çok küçük bir seviye) sessizlik için
+SILENCE_RESET_COUNT = 50  # Aktif konuşmacı bu kadar üst üste sessiz chunk gönderirse aktifliğini kaybeder
 
 def start():
     print("Server started, waiting for connections...")
@@ -28,16 +28,14 @@ def start():
         t = threading.Thread(target=handle_new_connection, args=(conn,))
         t.start()
 
-
 def handle_new_connection(conn):
     try:
         room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
         welcome_msg = (
-                "Available rooms:\n" +
-                room_list +
-                "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
+            "Available rooms:\n" +
+            room_list +
+            "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
         )
-
         conn.send(welcome_msg.encode('utf-8'))
 
         room_choice = conn.recv(1024)
@@ -52,13 +50,11 @@ def handle_new_connection(conn):
                 conn.send(b"Invalid room name. Disconnecting.\n")
                 conn.close()
                 return
-
             if new_room_name not in rooms:
                 rooms[new_room_name] = {
-                    'clients': [],
-                    'queues': {},
-                    'mixing_thread': None,
-                    'stop_mixing': False
+                    "clients": [],
+                    "active_speaker": None,
+                    "silence_count": {}
                 }
             room_choice = new_room_name
 
@@ -70,18 +66,9 @@ def handle_new_connection(conn):
             conn.close()
             return
 
-        # Odaya client ekle
-        rooms[room_choice]['clients'].append(conn)
-        rooms[room_choice]['queues'][conn] = queue.Queue()
-
+        rooms[room_choice]["clients"].append(conn)
+        rooms[room_choice]["silence_count"][conn] = 0
         conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
-
-        # Eğer miksleme thread'i yoksa başlat
-        if rooms[room_choice]['mixing_thread'] is None:
-            rooms[room_choice]['stop_mixing'] = False
-            mt = threading.Thread(target=mixing_thread, args=(room_choice,), daemon=True)
-            rooms[room_choice]['mixing_thread'] = mt
-            mt.start()
 
         handle_client(conn, room_choice)
 
@@ -89,108 +76,76 @@ def handle_new_connection(conn):
         print("Error in handle_new_connection:", e)
         conn.close()
 
-
 def handle_client(conn, room_name):
     try:
         while True:
             data = conn.recv(CHUNK)
             if not data:
                 break
-            # Gelen veriyi ilgili client's queue'suna ekle
-            if room_name in rooms and conn in rooms[room_name]['queues']:
-                rooms[room_name]['queues'][conn].put(data)
+
+            # Ses analizi
+            volume = average_absolute_amplitude(data)
+            room = rooms.get(room_name)
+            if room is None:
+                break
+
+            # Aktif konuşmacı yoksa ve sesli chunk geldiyse bu client aktif konuşmacı olsun
+            if room["active_speaker"] is None and volume > SILENCE_THRESHOLD:
+                room["active_speaker"] = conn
+                room["silence_count"][conn] = 0
+
+            # Eğer bu client aktif konuşmacı ise herkese yolla
+            if room["active_speaker"] == conn:
+                # Eğer sessizlik ise sayacı artır, değilse sıfırla
+                if volume <= SILENCE_THRESHOLD:
+                    room["silence_count"][conn] += 1
+                else:
+                    room["silence_count"][conn] = 0
+
+                # Eğer belli sayıda sessizlikten sonra aktif konuşmacı sessizliğe gömüldüyse aktifliği sıfırla
+                if room["silence_count"][conn] > SILENCE_RESET_COUNT:
+                    room["active_speaker"] = None
+                else:
+                    # Aktif konuşmacı ses gönderiyor, herkese dağıt
+                    for cl in room["clients"]:
+                        if cl != conn:
+                            try:
+                                cl.send(data)
+                            except:
+                                pass
+            else:
+                # Bu client aktif konuşmacı değilse sesi göz ardı et
+                # (Bu sayede aynı anda iki kişinin sesi karışmaz)
+                pass
+
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
-        # Client odayı terk ediyor
-        if room_name in rooms:
-            if conn in rooms[room_name]['clients']:
-                rooms[room_name]['clients'].remove(conn)
-            if conn in rooms[room_name]['queues']:
-                del rooms[room_name]['queues'][conn]
+        # Client disconnect
+        cleanup_client(conn, room_name)
 
-            conn.close()
+def cleanup_client(conn, room_name):
+    if room_name in rooms:
+        room = rooms[room_name]
+        if conn in room["clients"]:
+            room["clients"].remove(conn)
+        if conn in room["silence_count"]:
+            del room["silence_count"][conn]
+        # Eğer bu client aktif konuşmacı ise aktifliği sıfırla
+        if room["active_speaker"] == conn:
+            room["active_speaker"] = None
+        conn.close()
+        print(f"Client disconnected from room {room_name}")
+        # Oda boş ise odayı sil
+        if len(room["clients"]) == 0:
+            del rooms[room_name]
 
-            # Oda boşaldıysa odayı sil
-            if len(rooms[room_name]['clients']) == 0:
-                rooms[room_name]['stop_mixing'] = True
-                # mixing_thread kendi kendine duracak
-                time.sleep(0.5)
-                if room_name in rooms:
-                    del rooms[room_name]
-
-            print(f"Client disconnected from room {room_name}")
-
-
-def mixing_thread(room_name):
-    # Bu thread oda boşalana kadar çalışır
-    while True:
-        if room_name not in rooms:
-            break
-        if rooms[room_name]['stop_mixing']:
-            break
-
-        room_info = rooms[room_name]
-        clients = room_info['clients']
-        if len(clients) == 0:
-            time.sleep(0.1)
-            continue
-
-        # Her client'tan veri çek (veya sessizlik)
-        buffers = []
-        # Bu listede her index bir client'a karşılık geliyor
-        for cl in clients:
-            q = room_info['queues'][cl]
-            if not q.empty():
-                buf = q.get()
-                if len(buf) < CHUNK * SAMPLE_WIDTH:
-                    buf += bytes((CHUNK * SAMPLE_WIDTH) - len(buf))
-                buffers.append(buf)
-            else:
-                # Sessiz chunk
-                buffers.append(bytes([0] * (CHUNK * SAMPLE_WIDTH)))
-
-        # Bütün buffer'ları integer sample array'e çevir
-        samples_list = []
-        for buf in buffers:
-            samples = struct.unpack('<' + ('h' * CHUNK), buf)
-            samples_list.append(samples)
-
-        # Global miks: tüm clientların sesini topla
-        global_mix = [0] * CHUNK
-        for i in range(CHUNK):
-            s_sum = 0
-            for s in samples_list:
-                s_sum += s[i]
-            # Clamping
-            if s_sum > 32767:
-                s_sum = 32767
-            elif s_sum < -32768:
-                s_sum = -32768
-            global_mix[i] = s_sum
-
-        # Şimdi her client için kendi sesini global_mix'ten çıkar
-        # final_for_client = global_mix - self_samples
-        # Bu sayede client kendi sesini duymayacak.
-        for idx, cl in enumerate(clients):
-            client_samples = samples_list[idx]
-            final_samples = []
-            for i in range(CHUNK):
-                s_final = global_mix[i] - client_samples[i]
-                # Yine clamping yapalım
-                if s_final > 32767:
-                    s_final = 32767
-                elif s_final < -32768:
-                    s_final = -32768
-                final_samples.append(s_final)
-
-            final_data = struct.pack('<' + ('h' * CHUNK), *final_samples)
-            try:
-                cl.send(final_data)
-            except:
-                pass
-
-    print(f"Mixing thread for room {room_name} stopped.")
-
+def average_absolute_amplitude(data):
+    # 16-bit signed data
+    # data uzunluğumuz CHUNK * 2 byte
+    samples = struct.unpack('<' + ('h' * (len(data)//2)), data)
+    abs_values = [abs(s) for s in samples]
+    avg = sum(abs_values) / len(abs_values)
+    return avg
 
 start()
