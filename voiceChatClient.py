@@ -10,11 +10,11 @@ host = "35.158.171.58"
 port = 5000
 
 Format = pyaudio.paInt16
-Chunks = 4096  # Örnek sayısı
+Chunks = 4096
 Channels = 1
 Rate = 44100
 
-packet_size = 2 + (Chunks * 2)  # 2 bayt ID + 8192 bayt ses = 8194 bayt
+packet_size = 2 + (Chunks * 2)
 silence = bytes([0] * (Chunks * 2))
 
 stop_audio_threads = False
@@ -28,7 +28,6 @@ def connect_to_server():
 
 def choose_room(client):
     while True:
-        print("---------- Main Menu ----------")
         choice = input("Type an existing room name to join, 'NEW:<RoomName>' to create a new room, or 'q' to quit: ").strip()
         if choice.lower() == 'q':
             client.close()
@@ -89,13 +88,33 @@ def audio_streaming(client):
                 time.sleep(0.01)
                 continue
 
-            # Her kaynak için sırasıyla veri oynatma
+            buffers = []
             for sid, q in list(sources.items()):
                 if not q.empty():
-                    audio_data = q.get()
-                    output_stream.write(audio_data)
+                    buffers.append(q.get())
                 else:
-                    output_stream.write(silence)
+                    buffers.append(silence)
+
+            sample_arrays = []
+            for buf in buffers:
+                samples = struct.unpack('<' + ('h' * Chunks), buf)
+                sample_arrays.append(samples)
+
+            mixed_samples = []
+            for i in range(Chunks):
+                s_sum = 0
+                for arr in sample_arrays:
+                    s_sum += arr[i]
+
+                mixed_value = int(s_sum / len(sample_arrays))
+                if mixed_value > 32767:
+                    mixed_value = 32767
+                elif mixed_value < -32768:
+                    mixed_value = -32768
+                mixed_samples.append(mixed_value)
+
+            mixed_data = struct.pack('<' + ('h' * Chunks), *mixed_samples)
+            output_stream.write(mixed_data)
 
     t_send = threading.Thread(target=send_audio)
     t_recv = threading.Thread(target=receive_audio)
@@ -114,7 +133,6 @@ def audio_streaming(client):
     output_stream.stop_stream()
     output_stream.close()
     p.terminate()
-
 
 def main():
     while True:

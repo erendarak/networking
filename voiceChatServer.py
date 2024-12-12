@@ -50,14 +50,10 @@ def handle_new_connection(conn):
             room_choice = new_room_name
 
         if room_choice not in rooms:
-            if room_choice == "":
-                conn.send(b"No room chosen. Disconnecting.\n")
-            else:
-                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
             conn.close()
             return
 
-        # Yeni client için ID ata
         client_id = room_id_counters[room_choice]
         room_id_counters[room_choice] += 1
 
@@ -72,28 +68,18 @@ def handle_new_connection(conn):
 
 def handle_client(conn, room_name, client_id):
     try:
-        buffer = {}
         while True:
             data = conn.recv(4096)
             if not data:
                 break
 
-            # Gelen verinin başına 2 byte ID ekle
             id_bytes = struct.pack('>H', client_id)
             packet = id_bytes + data
 
-            # Tamponlama: Her istemci için sırasıyla veri sakla
             for (cl, cid) in rooms[room_name]:
                 if cl != conn:
-                    if cid not in buffer:
-                        buffer[cid] = []
-                    buffer[cid].append(packet)
-
-            # Tamponlanan verileri diğer istemcilere sırayla gönder
-            for (cl, cid) in rooms[room_name]:
-                if cl != conn and cid in buffer and buffer[cid]:
                     try:
-                        cl.send(buffer[cid].pop(0))
+                        cl.send(packet)
                     except:
                         pass
     except Exception as e:
@@ -106,6 +92,5 @@ def handle_client(conn, room_name, client_id):
             del rooms[room_name]
             del room_id_counters[room_name]
         print(f"Client disconnected from room {room_name}")
-
 
 start()
