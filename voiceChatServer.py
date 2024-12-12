@@ -72,6 +72,7 @@ def handle_new_connection(conn):
 
 def handle_client(conn, room_name, client_id):
     try:
+        buffer = {}
         while True:
             data = conn.recv(4096)
             if not data:
@@ -81,24 +82,30 @@ def handle_client(conn, room_name, client_id):
             id_bytes = struct.pack('>H', client_id)
             packet = id_bytes + data
 
-            # Bu paketi aynı odadaki diğer client'lara gönder
+            # Tamponlama: Her istemci için sırasıyla veri sakla
             for (cl, cid) in rooms[room_name]:
                 if cl != conn:
+                    if cid not in buffer:
+                        buffer[cid] = []
+                    buffer[cid].append(packet)
+
+            # Tamponlanan verileri diğer istemcilere sırayla gönder
+            for (cl, cid) in rooms[room_name]:
+                if cl != conn and cid in buffer and buffer[cid]:
                     try:
-                        cl.send(packet)
+                        cl.send(buffer[cid].pop(0))
                     except:
                         pass
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
-        # Remove the client from the room when disconnected
         if (conn, client_id) in rooms[room_name]:
             rooms[room_name].remove((conn, client_id))
         conn.close()
-        # Optional: if the room is empty, you could remove it from the dictionary
         if len(rooms[room_name]) == 0:
             del rooms[room_name]
             del room_id_counters[room_name]
         print(f"Client disconnected from room {room_name}")
+
 
 start()

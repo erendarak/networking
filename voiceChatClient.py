@@ -89,34 +89,13 @@ def audio_streaming(client):
                 time.sleep(0.01)
                 continue
 
-            buffers = []
+            # Her kaynak için sırasıyla veri oynatma
             for sid, q in list(sources.items()):
                 if not q.empty():
-                    buffers.append(q.get())
+                    audio_data = q.get()
+                    output_stream.write(audio_data)
                 else:
-                    buffers.append(silence)
-
-            sample_arrays = []
-            for buf in buffers:
-                samples = struct.unpack('<' + ('h' * Chunks), buf)
-                sample_arrays.append(samples)
-
-            mixed_samples = []
-            for i in range(Chunks):
-                s_sum = 0
-                for arr in sample_arrays:
-                    s_sum += arr[i]
-
-                # Amplify the mixed signal
-                amplified_value = int(s_sum * 1.5)  # Amplification factor: 1.5
-                if amplified_value > 32767:
-                    amplified_value = 32767
-                elif amplified_value < -32768:
-                    amplified_value = -32768
-                mixed_samples.append(amplified_value)
-
-            mixed_data = struct.pack('<' + ('h' * Chunks), *mixed_samples)
-            output_stream.write(mixed_data)
+                    output_stream.write(silence)
 
     t_send = threading.Thread(target=send_audio)
     t_recv = threading.Thread(target=receive_audio)
@@ -135,6 +114,7 @@ def audio_streaming(client):
     output_stream.stop_stream()
     output_stream.close()
     p.terminate()
+
 
 def main():
     while True:
