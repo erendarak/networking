@@ -1,140 +1,128 @@
 import socket
 import threading
-import pyaudio
 import sys
-import struct
-from collections import defaultdict
-from queue import Queue
-import numpy as np
-import webrtcvad
+import pyaudio
 
-host = "35.158.171.58"
-port = 5000
+# Burada host ve port'u sabit değişken olarak belirtiyoruz
+HOST = "35.158.171.58"  # Sunucunun IP adresi
+PORT = 5000  # Sunucunun portu
 
 Format = pyaudio.paInt16
-Chunks = 1024  # Smaller chunk size for lower latency
+Chunks = 4096
 Channels = 1
 Rate = 44100
 
-packet_size = 2 + (Chunks * 2)  # 2 bytes ID + audio data
-silence = bytes([0] * (Chunks * 2))
-
 stop_audio_threads = False
-sources = defaultdict(Queue)
 
-vad = webrtcvad.Vad()
-vad.set_mode(3)  # Aggressive VAD mode
 
-def connect_to_server():
-    client = socket.socket()
-    client.connect((host, port))
-    welcome_message = client.recv(4096).decode('utf-8')
-    return client, welcome_message
+class VoiceChatClient:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.client = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 
-def choose_room(client):
-    while True:
-        print("---------- Main Menu ----------")
-        choice = input("Type an existing room name to join, 'NEW:<RoomName>' to create a new room, or 'q' to quit: ").strip()
-        if choice.lower() == 'q':
-            client.close()
+        try:
+            self.client.connect((self.host, self.port))
+        except:
+            print("Couldn't connect to server")
             sys.exit(0)
 
-        client.send(choice.encode('utf-8'))
-        response = client.recv(4096).decode('utf-8')
-        print(response)
+        self.choose_room()
 
-        if "Joined room:" in response:
-            return True
+        self.p = pyaudio.PyAudio()
+        self.input_stream = self.p.open(format=Format,
+                                        channels=Channels,
+                                        rate=Rate,
+                                        input=True,
+                                        frames_per_buffer=Chunks)
 
-def audio_streaming(client):
-    global stop_audio_threads
-    stop_audio_threads = False
+        self.output_stream = self.p.open(format=Format,
+                                         channels=Channels,
+                                         rate=Rate,
+                                         output=True,
+                                         frames_per_buffer=Chunks)
 
-    p = pyaudio.PyAudio()
-    input_stream = p.open(format=Format,
-                          channels=Channels,
-                          rate=Rate,
-                          input=True,
-                          frames_per_buffer=Chunks)
+        print("Successfully joined the room!")
 
-    output_stream = p.open(format=Format,
-                           channels=Channels,
-                           rate=Rate,
-                           output=True,
-                           frames_per_buffer=Chunks)
+        # Thread'leri başlat
+        self.stop_audio_threads = False
+        t_send = threading.Thread(target=self.send_audio)
+        t_recv = threading.Thread(target=self.receive_audio)
+        t_input = threading.Thread(target=self.user_input_loop)
 
-    def send_audio():
-        while not stop_audio_threads:
-            try:
-                data = input_stream.read(Chunks, exception_on_overflow=False)
-                if vad.is_speech(data, Rate):  # Send only if speech is detected
-                    client.send(data)
-            except Exception as e:
-                print("Send audio error:", e)
-                break
+        t_send.start()
+        t_recv.start()
+        t_input.start()
 
-    def receive_audio():
-        buf = b""
-        while not stop_audio_threads:
-            try:
-                chunk = client.recv(packet_size - len(buf))
-                if not chunk:
-                    break
-                buf += chunk
-                if len(buf) == packet_size:
-                    sender_id = struct.unpack('>H', buf[:2])[0]
-                    audio_data = buf[2:]
-                    sources[sender_id].put(audio_data)
-                    buf = b""
-            except Exception as e:
-                print("Receive audio error:", e)
-                break
+        t_send.join()
+        t_recv.join()
 
-    def mixer_thread():
-        import time
-        while not stop_audio_threads:
-            if len(sources) == 0:
-                time.sleep(0.01)
-                continue
+        self.input_stream.stop_stream()
+        self.input_stream.close()
+        self.output_stream.stop_stream()
+        self.output_stream.close()
+        self.p.terminate()
 
-            mix = np.zeros(Chunks, dtype=np.int16)
-            for sid, q in list(sources.items()):
-                if not q.empty():
-                    audio_data = q.get()
-                    audio_np = np.frombuffer(audio_data, dtype=np.int16)
-                    mix = np.add(mix, audio_np, casting='safe')
-
-            mix = np.clip(mix, -32768, 32767)  # Prevent overflow
-            output_stream.write(mix.tobytes())
-
-    t_send = threading.Thread(target=send_audio)
-    t_recv = threading.Thread(target=receive_audio)
-    t_mix = threading.Thread(target=mixer_thread)
-
-    t_send.start()
-    t_recv.start()
-    t_mix.start()
-
-    t_send.join()
-    t_recv.join()
-    t_mix.join()
-
-    input_stream.stop_stream()
-    input_stream.close()
-    output_stream.stop_stream()
-    output_stream.close()
-    p.terminate()
-
-def main():
-    while True:
-        client, welcome_message = connect_to_server()
+    def choose_room(self):
+        # Oda listesi ve talimatları al
+        welcome_message = self.client.recv(4096).decode('utf-8')
         print(welcome_message)
 
-        joined = choose_room(client)
-        if not joined:
-            continue
+        while True:
+            choice = input(
+                "Type an existing room name to join, 'NEW:<RoomName>' to create a new room, or 'q' to quit: ").strip()
+            if choice.lower() == 'q':
+                self.client.close()
+                sys.exit(0)
 
-        audio_streaming(client)
+            self.client.send(choice.encode('utf-8'))
+            response = self.client.recv(4096).decode('utf-8')
+            print(response)
+
+            if "Joined room:" in response:
+                # Odaya girdik
+                return
+            elif "Invalid" in response or "does not exist" in response or "No room chosen" in response:
+                if "Disconnecting" in response:
+                    # Bağlantı kesilmiş, tekrar deneyemeyiz
+                    self.client.close()
+                    sys.exit(0)
+                # Aksi halde tekrar dene
+            elif "No rooms available" in response:
+                # Yeni oda oluştur veya tekrar dene
+                pass
+
+    def send_audio(self):
+        while not self.stop_audio_threads:
+            try:
+                data = self.input_stream.read(Chunks, exception_on_overflow=False)
+                self.client.sendall(data)
+            except:
+                break
+
+    def receive_audio(self):
+        while not self.stop_audio_threads:
+            try:
+                data = self.client.recv(Chunks)
+                if not data:
+                    break
+                self.output_stream.write(data)
+            except:
+                break
+
+    def user_input_loop(self):
+        # Kullanıcı "leave" yazarsa odayı terk et
+        while not self.stop_audio_threads:
+            command = sys.stdin.readline().strip().lower()
+            if command == "leave":
+                break
+        self.stop_audio_threads = True
+        try:
+            self.client.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+        self.client.close()
+
 
 if __name__ == "__main__":
-    main()
+    client = VoiceChatClient(HOST, PORT)
