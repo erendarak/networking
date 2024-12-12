@@ -78,7 +78,6 @@ def handle_client(conn, room_name, client_id):
                 break
 
             # Gelen verinin başına 2 byte ID ekle
-            # ID'yi unsigned short (2 byte) big-endian olarak ekliyoruz
             id_bytes = struct.pack('>H', client_id)
             packet = id_bytes + data
 
