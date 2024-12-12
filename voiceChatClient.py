@@ -4,7 +4,7 @@ import sys
 import pyaudio
 
 # Burada host ve port'u sabit değişken olarak belirtiyoruz
-HOST = "35.158.171.58"  # Sunucunun IP adresi
+HOST = "54.93.170.220"  # Sunucunun IP adresi
 PORT = 5000  # Sunucunun portu
 
 Format = pyaudio.paInt16
