@@ -3,8 +3,8 @@ import threading
 import asyncio
 import sys
 import json
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaBlackhole, MediaRelay
-from aiortc.contrib.media import MediaStreamTrack
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaStreamTrack, MediaRelay
 
 port = 5000
 host = "0.0.0.0"

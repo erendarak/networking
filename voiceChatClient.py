@@ -3,7 +3,8 @@ import sys
 import json
 import asyncio
 import threading
-from aiortc import RTCPeerConnection, RTCSessionDescription, MediaPlayer
+from aiortc import RTCPeerConnection, RTCSessionDescription
+from aiortc.contrib.media import MediaPlayer
 
 host = "54.93.170.220"
 port = 5000
