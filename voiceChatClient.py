@@ -119,12 +119,19 @@ def audio_streaming(client):
                 s_sum = 0
                 for arr in sample_arrays:
                     s_sum += arr[i]
-                # Clamping
+
+                # Clamping with normalization
                 if s_sum > 32767:
                     s_sum = 32767
                 elif s_sum < -32768:
                     s_sum = -32768
                 mixed_samples.append(s_sum)
+
+            # Normalize mixed audio (optional)
+            max_value = max(abs(s) for s in mixed_samples)
+            if max_value > 0:
+                scaling_factor = 32767 / max_value
+                mixed_samples = [int(s * scaling_factor) for s in mixed_samples]
 
             mixed_data = struct.pack('<' + ('h'*Chunks), *mixed_samples)
             output_stream.write(mixed_data)
