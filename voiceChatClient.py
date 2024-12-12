@@ -10,7 +10,7 @@ host = "35.158.171.58"
 port = 5000
 
 Format = pyaudio.paInt16
-Chunks = 4096  # Her chunk 4096 örnek içeriyor
+Chunks = 4096
 Channels = 1
 Rate = 44100
 
@@ -103,16 +103,21 @@ def audio_streaming(client):
             mixed_samples = []
             for i in range(Chunks):
                 s_sum = 0
+                count = 0
                 for arr in sample_arrays:
-                    s_sum += arr[i]
+                    if abs(arr[i]) > 500:  # Parazit filtresi
+                        s_sum += arr[i]
+                        count += 1
+                if count > 0:
+                    mixed_value = int(s_sum / count)  # Dinamik normalizasyon
+                else:
+                    mixed_value = 0
 
-                # Amplify and normalize the mixed signal
-                amplified_value = int(s_sum * 1.02)  # Amplification factor
-                if amplified_value > 32767:
-                    amplified_value = 32767
-                elif amplified_value < -32768:
-                    amplified_value = -32768
-                mixed_samples.append(amplified_value)
+                if mixed_value > 32767:
+                    mixed_value = 32767
+                elif mixed_value < -32768:
+                    mixed_value = -32768
+                mixed_samples.append(mixed_value)
 
             mixed_data = struct.pack('<' + ('h' * Chunks), *mixed_samples)
             output_stream.write(mixed_data)
