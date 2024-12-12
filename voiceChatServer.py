@@ -1,102 +1,148 @@
 import socket
 import threading
+import asyncio
+import sys
+import json
+from aiortc import RTCPeerConnection, RTCSessionDescription, MediaBlackhole, MediaRelay
+from aiortc.contrib.media import MediaStreamTrack
 
-HOST = "0.0.0.0"
-PORT = 5000
+port = 5000
+host = "0.0.0.0"
 
-class VoiceChatServer:
-    def __init__(self, host, port):
-        self.host = host
-        self.port = port
-        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.server.bind((self.host, self.port))
-        self.server.listen(5)
-        print(f"Server started, listening on {self.host}:{self.port}")
+server = socket.socket()
+server.bind((host, port))
+server.listen(5)
 
-        # Oda yönetimi
-        self.rooms = {}  # { "roomName": [conn1, conn2, ...] }
+rooms = {}  # "roomName": { "peers": [ (pc, conn), ... ], "relay": MediaRelay() }
 
-    def start(self):
-        while True:
-            conn, addr = self.server.accept()
-            print(f"Client connected from {addr}")
-            t = threading.Thread(target=self.handle_new_connection, args=(conn,))
-            t.start()
+# aiortc event loop
+loop = asyncio.new_event_loop()
+asyncio_thread = threading.Thread(target=loop.run_forever, daemon=True)
+asyncio_thread.start()
 
-    def handle_new_connection(self, conn):
-        try:
-            # Oda listesini gönder
-            room_list = "\n".join(self.rooms.keys()) if self.rooms else "No rooms available."
-            welcome_msg = (
+def start():
+    print("Server started, waiting for connections...")
+    while True:
+        conn, addr = server.accept()
+        print(f"Client connected from {addr}")
+        t = threading.Thread(target=handle_new_connection, args=(conn,))
+        t.start()
+
+def handle_new_connection(conn):
+    try:
+        # Oda listesini gönder
+        room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
+        welcome_msg = (
                 "Available rooms:\n" +
                 room_list +
                 "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
-            )
+        )
+        conn.send(welcome_msg.encode('utf-8'))
 
-            conn.send(welcome_msg.encode('utf-8'))
-
-            # Oda seçimini al
-            room_choice = conn.recv(1024)
-            if not room_choice:
+        # Oda seçimi
+        room_choice = conn.recv(1024).decode('utf-8').strip()
+        if room_choice.startswith("NEW:"):
+            new_room_name = room_choice.split("NEW:")[-1].strip()
+            if not new_room_name:
+                conn.send(b"Invalid room name. Disconnecting.\n")
                 conn.close()
                 return
-            room_choice = room_choice.decode('utf-8').strip()
+            if new_room_name not in rooms:
+                rooms[new_room_name] = {"peers": [], "relay": MediaRelay()}
+            room_choice = new_room_name
 
-            # Yeni oda yaratma
-            if room_choice.startswith("NEW:"):
-                new_room_name = room_choice.split("NEW:")[-1].strip()
-                if not new_room_name:
-                    conn.send(b"Invalid room name. Disconnecting.\n")
-                    conn.close()
-                    return
+        if room_choice not in rooms:
+            if room_choice == "":
+                conn.send(b"No room chosen. Disconnecting.\n")
+            else:
+                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            conn.close()
+            return
 
-                if new_room_name not in self.rooms:
-                    self.rooms[new_room_name] = []
-                room_choice = new_room_name
+        conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
 
-            # Oda var mı kontrolü
-            if room_choice not in self.rooms:
-                if room_choice == "":
-                    conn.send(b"No room chosen. Disconnecting.\n")
-                else:
-                    msg = f"Room '{room_choice}' does not exist. Disconnecting.\n"
-                    conn.send(msg.encode('utf-8'))
-                conn.close()
-                return
+        # Oda içi WebRTC bağlantısını başlat
+        # Client offer bekle
+        data = conn.recv(4096)
+        # data JSON formatında: {"type": "offer", "sdp": "..."}
+        offer = json.loads(data.decode('utf-8'))
+        if offer["type"] != "offer":
+            conn.close()
+            return
+
+        # RTCPeerConnection oluştur
+        pc = RTCPeerConnection()
+
+        # Odaya ekle
+        room = rooms[room_choice]
+
+        # Diğer peer'ların tracklerini bu peer'e ekle
+        for (other_pc, other_conn) in room["peers"]:
+            # Her existing pc’nin tracklerini buna ekle
+            # On_track eventinde eklenecek
+            pass
+
+        # Yeni PC’nin track event’i
+        @pc.on("track")
+        def on_track(track):
+            # Gelen track’i relay et
+            relay_track = room["relay"].subscribe(track)
+            # Bu track'i odadaki diğer peer'lere ekle
+            # (Her yeni track geldiğinde diğer peer'lere forward ediyoruz)
+            for (other_pc, other_conn) in room["peers"]:
+                other_pc.addTrack(relay_track)
+
+            # Aynı şekilde bu yeni pc'ye de odadaki eski trackleri eklememiz lazım.
+            # Ama eski trackler zaten @other_pc.on("track") ile ekleniyor.
+            # Burada basit tutuyoruz.
+
+        async def handle_webrtc():
+            # Offer alındı, setRemoteDescription
+            await pc.setRemoteDescription(RTCSessionDescription(offer["sdp"], offer["type"]))
+
+            # Answer oluştur
+            answer = await pc.createAnswer()
+            await pc.setLocalDescription(answer)
+
+            # Answer'ı client'a gönder
+            ans = {"type": pc.localDescription.type, "sdp": pc.localDescription.sdp}
+            ans_data = json.dumps(ans).encode('utf-8')
+            conn.send(ans_data)
 
             # Odaya ekle
-            self.rooms[room_choice].append(conn)
-            conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
+            room["peers"].append((pc, conn))
 
-            self.handle_client(conn, room_choice)
+        fut = asyncio.run_coroutine_threadsafe(handle_webrtc(), loop)
+        fut.result()
 
-        except Exception as e:
-            print("Error in handle_new_connection:", e)
-            conn.close()
+        # Artık WebRTC üzerinden ses akışı sağlanacak.
+        # Bu thread şimdilik burada kalabilir,
+        # Peer kapandığında pc kapatılır.
 
-    def handle_client(self, conn, room_name):
-        try:
-            while True:
-                data = conn.recv(4096)
-                if not data:
-                    break
-                # Bu odadaki diğer client'lara ilet
-                for cl in self.rooms[room_name]:
-                    if cl != conn:
-                        cl.send(data)
-        except Exception as e:
-            print("Error or disconnection:", e)
-        finally:
-            # Odadan çıkar
-            if conn in self.rooms[room_name]:
-                self.rooms[room_name].remove(conn)
-            conn.close()
-            # Oda boşsa sil
-            if len(self.rooms[room_name]) == 0:
-                del self.rooms[room_name]
-            print(f"Client disconnected from room {room_name}")
+        # Client disconnect olana kadar bekle
+        # WebRTC bağlantısı kesilince, peer'i odadan çıkar
+        while True:
+            # Burada normal bir bekleme yapıyoruz.
+            # Gerçekte peer connection kapandığında bir event yakalayıp odadan çıkarabilirsin.
+            # Şimdilik soket kapanınca çıkıyoruz.
+            chunk = conn.recv(1024)
+            if not chunk:
+                break
 
+    except Exception as e:
+        print("Error in handle_new_connection:", e)
+    finally:
+        # Client ayrılıyor
+        # PC kapat
+        for (p, c) in rooms[room_choice]["peers"]:
+            if c == conn:
+                coro = p.close()
+                asyncio.run_coroutine_threadsafe(coro, loop)
+                rooms[room_choice]["peers"].remove((p, c))
+                break
+        conn.close()
+        if len(rooms[room_choice]["peers"]) == 0:
+            del rooms[room_choice]
+        print(f"Client disconnected from room {room_choice}")
 
-if __name__ == "__main__":
-    server = VoiceChatServer(HOST, PORT)
-    server.start()
+start()
