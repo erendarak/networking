@@ -7,19 +7,12 @@ import time
 port = 5000
 host = "0.0.0.0"
 
-server = socket.socket()
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind((host, port))
 server.listen(5)
 
-# Odaları tutan sözlük.
-# Her oda için:
-# {
-#   'clients': [conn1, conn2, ...],
-#   'queues': {conn1: Queue(), ...},
-#   'mixing_thread': threading.Thread veya None,
-#   'stop_mixing': bool
-# }
-rooms = {}
+# Odalar için yapı
+rooms = {}  # { "RoomName": { "clients": [], "queues": {conn:Queue}, "mixing_thread":Thread, "stop_mixing":False } }
 
 CHUNK = 4096
 SAMPLE_WIDTH = 2  # 16-bit ses
@@ -104,7 +97,6 @@ def handle_client(conn, room_name):
             if not data:
                 break
             # Gelen veriyi ilgili client's queue'suna ekle
-            # Miksleme thread'i bu veriyi alıp işleyip diğerlerine dağıtacak
             if room_name in rooms and conn in rooms[room_name]['queues']:
                 rooms[room_name]['queues'][conn].put(data)
     except Exception as e:
@@ -123,9 +115,6 @@ def handle_client(conn, room_name):
             if len(rooms[room_name]['clients']) == 0:
                 rooms[room_name]['stop_mixing'] = True
                 # mixing_thread kendi kendine duracak
-                # Oda dict'ini thread durduktan sonra silelim
-                # Thread durmadan silersek sorun olabilir.
-                # Basitçe biraz bekleyelim:
                 time.sleep(0.5)
                 if room_name in rooms:
                     del rooms[room_name]
@@ -147,35 +136,28 @@ def mixing_thread(room_name):
             time.sleep(0.1)
             continue
 
-        # Tüm client'lardan CHUNK uzunluğunda veri çek
+        # Her client'tan veri çek (veya sessizlik)
         buffers = []
-        # Eğer client'ta veri yoksa sessizlik ekle
+        # Bu listede her index bir client'a karşılık geliyor
         for cl in clients:
             q = room_info['queues'][cl]
             if not q.empty():
                 buf = q.get()
-                # Eğer buf CHUNK'tan farklı uzunluktaysa, kısalt veya doldur
                 if len(buf) < CHUNK * SAMPLE_WIDTH:
-                    buf += bytes([0] * ((CHUNK * SAMPLE_WIDTH) - len(buf)))
+                    buf += bytes((CHUNK * SAMPLE_WIDTH) - len(buf))
                 buffers.append(buf)
             else:
                 # Sessiz chunk
                 buffers.append(bytes([0] * (CHUNK * SAMPLE_WIDTH)))
 
-        # Eğer kimse konuşmuyorsa sadece beklemeye devam et
-        # Ama yine de sessizlikte de olsa gönderirsek sorun olmaz,
-        # fakat gereksiz bant genişliği harcar.
-        # İsterseniz kimse konuşmuyorsa göndermeyebilirsiniz.
-
-        # buffers içinde her client'in 4096 sample (2 byte per sample) verisi var
-        # Bu verileri mix edelim
-        # 16-bit little-endian signed integers
+        # Bütün buffer'ları integer sample array'e çevir
         samples_list = []
         for buf in buffers:
             samples = struct.unpack('<' + ('h' * CHUNK), buf)
             samples_list.append(samples)
 
-        mixed_samples = []
+        # Global miks: tüm clientların sesini topla
+        global_mix = [0] * CHUNK
         for i in range(CHUNK):
             s_sum = 0
             for s in samples_list:
@@ -185,24 +167,29 @@ def mixing_thread(room_name):
                 s_sum = 32767
             elif s_sum < -32768:
                 s_sum = -32768
-            mixed_samples.append(s_sum)
+            global_mix[i] = s_sum
 
-        mixed_data = struct.pack('<' + ('h' * CHUNK), *mixed_samples)
+        # Şimdi her client için kendi sesini global_mix'ten çıkar
+        # final_for_client = global_mix - self_samples
+        # Bu sayede client kendi sesini duymayacak.
+        for idx, cl in enumerate(clients):
+            client_samples = samples_list[idx]
+            final_samples = []
+            for i in range(CHUNK):
+                s_final = global_mix[i] - client_samples[i]
+                # Yine clamping yapalım
+                if s_final > 32767:
+                    s_final = 32767
+                elif s_final < -32768:
+                    s_final = -32768
+                final_samples.append(s_final)
 
-        # Şimdi bu mixed_data'yı odadaki tüm client'lara gönder
-        for cl in clients:
+            final_data = struct.pack('<' + ('h' * CHUNK), *final_samples)
             try:
-                cl.send(mixed_data)
+                cl.send(final_data)
             except:
                 pass
 
-        # Çok yoğun işlem yapmamak için ufak bir bekleme, idealde gerekli olmayabilir
-        # ancak yüksek CPU kullanımı görürseniz azaltabilirsiniz.
-        # Aslında ses gerçek zamanlı olduğu için bekleme koymuyoruz.
-        # time.sleep(0.001)
-
-    # Oda ya silindi ya da stop_mixing true oldu
-    # Thread bitiyor
     print(f"Mixing thread for room {room_name} stopped.")
 
 
