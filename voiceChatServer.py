@@ -8,43 +8,59 @@ server = socket.socket()
 server.bind((host, port))
 server.listen(5)
 
-# Dictionary to hold rooms and their client lists
-rooms = {
-    "A": [],
-    "B": []
-}
+rooms = {}  # starts empty, rooms will be added dynamically
 
 
 def start():
+    print("Server started, waiting for connections...")
     while True:
         conn, addr = server.accept()
         print(f"Client connected from {addr}")
-
-        # Handle room assignment in a separate thread
         t = threading.Thread(target=handle_new_connection, args=(conn,))
         t.start()
 
 
 def handle_new_connection(conn):
     try:
-        # First, we receive which room the client wants to join
-        # The client should send this information immediately upon connecting.
+        # Send the list of current rooms and instructions
+        room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
+        welcome_msg = (
+                "Available rooms:\n" +
+                room_list +
+                "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
+        )
+
+        conn.send(welcome_msg.encode('utf-8'))
+
+        # Receive the room choice or new room request
         room_choice = conn.recv(1024).decode('utf-8').strip()
 
+        # Handle new room creation
+        if room_choice.startswith("NEW:"):
+            new_room_name = room_choice.split("NEW:")[-1].strip()
+            if not new_room_name:
+                conn.send(b"Invalid room name. Disconnecting.\n")
+                conn.close()
+                return
+
+            # If room doesn't exist, create it
+            if new_room_name not in rooms:
+                rooms[new_room_name] = []
+            room_choice = new_room_name
+
+        # If the chosen room does not exist and not a NEW request, handle error
         if room_choice not in rooms:
-            # If the requested room doesn't exist, you can handle it by:
-            # 1. Defaulting to a specific room
-            # 2. Closing the connection
-            # 3. Sending an error message back
-            #
-            # For simplicity, we will default them to room A if invalid:
-            room_choice = "A"
+            if room_choice == "":
+                conn.send(b"No room chosen. Disconnecting.\n")
+            else:
+                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            conn.close()
+            return
 
-        # Add client to the chosen room
+        # Add the client to the chosen room
         rooms[room_choice].append(conn)
-        print(f"Client added to room {room_choice}")
+        conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
 
-        # Now start handling incoming audio data from this client
         handle_client(conn, room_choice)
 
     except Exception as e:
@@ -58,12 +74,10 @@ def handle_client(conn, room_name):
             data = conn.recv(4096)
             if not data:
                 break
-
             # Broadcast the data to all other clients in the same room
             for cl in rooms[room_name]:
                 if cl != conn:
                     cl.send(data)
-
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
@@ -71,6 +85,9 @@ def handle_client(conn, room_name):
         if conn in rooms[room_name]:
             rooms[room_name].remove(conn)
         conn.close()
+        # Optional: if the room is empty, you could remove it from the dictionary
+        if len(rooms[room_name]) == 0:
+            del rooms[room_name]
         print(f"Client disconnected from room {room_name}")
 
 
