@@ -1,24 +1,17 @@
 import socket
 import threading
 import struct
-import time
 
 port = 5000
 host = "0.0.0.0"
 
-server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+server = socket.socket()
 server.bind((host, port))
 server.listen(5)
 
-rooms = {}  # { roomName: {"clients": [], "active_speaker": None, "silence_count": {conn: int}} }
-
-CHUNK = 4096
-SAMPLE_WIDTH = 2  # 16-bit PCM
-CHANNELS = 1
-RATE = 44100
-
-SILENCE_THRESHOLD = 50  # Max ortalama mutlak değer (çok küçük bir seviye) sessizlik için
-SILENCE_RESET_COUNT = 50  # Aktif konuşmacı bu kadar üst üste sessiz chunk gönderirse aktifliğini kaybeder
+# rooms = { "roomName": [ (conn, client_id), ... ] }
+rooms = {}
+room_id_counters = {}  # Her oda için ID sayacı
 
 def start():
     print("Server started, waiting for connections...")
@@ -50,12 +43,10 @@ def handle_new_connection(conn):
                 conn.send(b"Invalid room name. Disconnecting.\n")
                 conn.close()
                 return
+
             if new_room_name not in rooms:
-                rooms[new_room_name] = {
-                    "clients": [],
-                    "active_speaker": None,
-                    "silence_count": {}
-                }
+                rooms[new_room_name] = []
+                room_id_counters[new_room_name] = 1
             room_choice = new_room_name
 
         if room_choice not in rooms:
@@ -66,86 +57,49 @@ def handle_new_connection(conn):
             conn.close()
             return
 
-        rooms[room_choice]["clients"].append(conn)
-        rooms[room_choice]["silence_count"][conn] = 0
+        # Yeni client için ID ata
+        client_id = room_id_counters[room_choice]
+        room_id_counters[room_choice] += 1
+
+        rooms[room_choice].append((conn, client_id))
         conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
 
-        handle_client(conn, room_choice)
+        handle_client(conn, room_choice, client_id)
 
     except Exception as e:
         print("Error in handle_new_connection:", e)
         conn.close()
 
-def handle_client(conn, room_name):
+def handle_client(conn, room_name, client_id):
     try:
         while True:
-            data = conn.recv(CHUNK)
+            data = conn.recv(4096)
             if not data:
                 break
 
-            # Ses analizi
-            volume = average_absolute_amplitude(data)
-            room = rooms.get(room_name)
-            if room is None:
-                break
+            # Gelen verinin başına 2 byte ID ekle
+            # ID'yi unsigned short (2 byte) big-endian olarak ekliyoruz
+            id_bytes = struct.pack('>H', client_id)
+            packet = id_bytes + data
 
-            # Aktif konuşmacı yoksa ve sesli chunk geldiyse bu client aktif konuşmacı olsun
-            if room["active_speaker"] is None and volume > SILENCE_THRESHOLD:
-                room["active_speaker"] = conn
-                room["silence_count"][conn] = 0
-
-            # Eğer bu client aktif konuşmacı ise herkese yolla
-            if room["active_speaker"] == conn:
-                # Eğer sessizlik ise sayacı artır, değilse sıfırla
-                if volume <= SILENCE_THRESHOLD:
-                    room["silence_count"][conn] += 1
-                else:
-                    room["silence_count"][conn] = 0
-
-                # Eğer belli sayıda sessizlikten sonra aktif konuşmacı sessizliğe gömüldüyse aktifliği sıfırla
-                if room["silence_count"][conn] > SILENCE_RESET_COUNT:
-                    room["active_speaker"] = None
-                else:
-                    # Aktif konuşmacı ses gönderiyor, herkese dağıt
-                    for cl in room["clients"]:
-                        if cl != conn:
-                            try:
-                                cl.send(data)
-                            except:
-                                pass
-            else:
-                # Bu client aktif konuşmacı değilse sesi göz ardı et
-                # (Bu sayede aynı anda iki kişinin sesi karışmaz)
-                pass
-
+            # Bu paketi aynı odadaki diğer client'lara gönder
+            for (cl, cid) in rooms[room_name]:
+                if cl != conn:
+                    try:
+                        cl.send(packet)
+                    except:
+                        pass
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
-        # Client disconnect
-        cleanup_client(conn, room_name)
-
-def cleanup_client(conn, room_name):
-    if room_name in rooms:
-        room = rooms[room_name]
-        if conn in room["clients"]:
-            room["clients"].remove(conn)
-        if conn in room["silence_count"]:
-            del room["silence_count"][conn]
-        # Eğer bu client aktif konuşmacı ise aktifliği sıfırla
-        if room["active_speaker"] == conn:
-            room["active_speaker"] = None
+        # Remove the client from the room when disconnected
+        if (conn, client_id) in rooms[room_name]:
+            rooms[room_name].remove((conn, client_id))
         conn.close()
-        print(f"Client disconnected from room {room_name}")
-        # Oda boş ise odayı sil
-        if len(room["clients"]) == 0:
+        # Optional: if the room is empty, you could remove it from the dictionary
+        if len(rooms[room_name]) == 0:
             del rooms[room_name]
-
-def average_absolute_amplitude(data):
-    # 16-bit signed data
-    # data uzunluğumuz CHUNK * 2 byte
-    samples = struct.unpack('<' + ('h' * (len(data)//2)), data)
-    abs_values = [abs(s) for s in samples]
-    avg = sum(abs_values) / len(abs_values)
-    return avg
+            del room_id_counters[room_name]
+        print(f"Client disconnected from room {room_name}")
 
 start()
