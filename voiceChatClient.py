@@ -3,7 +3,7 @@ import threading
 import pyaudio
 import sys
 
-host = "18.185.136.12"
+host = "18.197.204.63"
 port = 5000
 
 Format = pyaudio.paInt16
