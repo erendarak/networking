@@ -4,7 +4,7 @@ import json
 
 clients = set()
 
-async def handler(websocket, path):
+async def handler(websocket):
     # Add the client to the set
     clients.add(websocket)
     try:
