@@ -1,5 +1,6 @@
 from socket import *
 from threading import Thread, Lock
+import queue
 
 class EntryThread(Thread):
     def __init__(self, host, port):
@@ -15,47 +16,59 @@ class EntryThread(Thread):
         while True:
             sock_v, data_v = self.voice_socket.accept()
             print(f"New connection from {data_v}")
-            thread = HandleClientThread(sock_v)
-            thread.start()
+            ClientHandler(sock_v, data_v).start()
 
-class HandleClientThread(Thread):
-    def __init__(self, vsock):
-        global clients
+class ClientHandler(Thread):
+    def __init__(self, client_socket, address):
         Thread.__init__(self)
-        self.chunk = 1024
-        self.vsock = vsock
-        with mutex:  # Add client to the list
-            clients.append(self.vsock)
+        self.client_socket = client_socket
+        self.address = address
+        self.chunk_size = 1024
 
     def run(self):
         global clients
-        while True:
-            try:
-                audio_data = self.vsock.recv(self.chunk)
+        with client_lock:
+            clients[self.client_socket] = queue.Queue()  # Create a queue for this client
+        print(f"Client {self.address} connected.")
+
+        try:
+            while True:
+                audio_data = self.client_socket.recv(self.chunk_size)
                 if not audio_data:
                     break
-                with mutex:
-                    for client in clients:
-                        if client != self.vsock:  # Do not send to the sender
-                            try:
-                                client.sendall(audio_data)
-                            except Exception as e:
-                                print(f"Error sending audio: {e}")
-                                clients.remove(client)
-            except Exception as e:
-                print(f"Error receiving audio: {e}")
-                break
-        with mutex:  # Remove client on disconnect
-            clients.remove(self.vsock)
-            print(f"Client disconnected")
+                with client_lock:
+                    # Add received audio to the queues of all other clients
+                    for client, q in clients.items():
+                        if client != self.client_socket:
+                            q.put(audio_data)
+        except Exception as e:
+            print(f"Error handling client {self.address}: {e}")
+        finally:
+            with client_lock:
+                del clients[self.client_socket]
+            self.client_socket.close()
+            print(f"Client {self.address} disconnected.")
 
-mutex = Lock()
-clients = []
+class Broadcaster(Thread):
+    def run(self):
+        global clients
+        while True:
+            with client_lock:
+                for client, q in list(clients.items()):
+                    try:
+                        while not q.empty():
+                            audio_data = q.get_nowait()
+                            client.sendall(audio_data)
+                    except Exception as e:
+                        print(f"Error broadcasting to client: {e}")
+                        del clients[client]
+
+clients = {}
+client_lock = Lock()
 
 if __name__ == "__main__":
     host = "0.0.0.0"
     port = 5000
 
-    server = EntryThread(host, port)
-    server.start()
-    server.join()
+    EntryThread(host, port).start()
+    Broadcaster().start()

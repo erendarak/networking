@@ -71,9 +71,8 @@ if __name__ == "__main__":
     # Replace with the public IP of your AWS server
     host = "3.74.41.193"
     port = 5000
-    username = input("Enter your username: ")
 
-    client = VoiceChatClient(host, port, username)
+    client = VoiceChatClient(host, port)
     try:
         client.start()
     except KeyboardInterrupt:
