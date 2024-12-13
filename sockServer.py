@@ -27,8 +27,17 @@ class HandleClientThread(Thread):
         self.chunk = 1024
         self.vsock = vsock
         self.vdata = vdata
-        self.name = self.vsock.recv(self.chunk).decode()
-        print(f"Client registered: {self.name}")
+        try:
+            # Attempt to receive and decode the username
+            data = self.vsock.recv(self.chunk)
+            self.name = data.decode('utf-8').strip()
+            print(f"Client registered: {self.name}")
+            if not self.name:  # Ensure the username is not empty
+                raise ValueError("Username is empty or invalid")
+        except (UnicodeDecodeError, ValueError) as e:
+            print(f"Error during client registration: {e}")
+            self.vsock.close()
+            raise
         with mutex:  # Add client in a thread-safe manner
             clients[self.name] = {'address': self.vdata, 'socket': self.vsock, 'buffer': []}
 
@@ -52,7 +61,6 @@ class HandleClientThread(Thread):
             clients.pop(self.name, None)
 
 
-# Separate thread to handle sending data from buffers
 class BroadcastThread(Thread):
     def run(self):
         while True:
@@ -66,7 +74,6 @@ class BroadcastThread(Thread):
                             client_info['buffer'].clear()  # Clear buffer after sending
                         except Exception as e:
                             print(f"Error broadcasting to {client_name}: {e}")
-                            # Handle client disconnection
                             clients.pop(client_name, None)
                             break
 
@@ -75,15 +82,12 @@ mutex = Lock()
 clients = {}
 
 if __name__ == "__main__":
-    # AWS-friendly host and port
     host = "0.0.0.0"
     port = 5000
 
-    # Start the server thread
     server = EntryThread(host, port)
     server.start()
 
-    # Start the broadcasting thread
     broadcaster = BroadcastThread()
     broadcaster.start()
 
