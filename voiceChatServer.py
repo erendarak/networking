@@ -8,8 +8,9 @@ server = socket.socket()
 server.bind((host, port))
 server.listen(5)
 
-rooms = {}  # Starts empty, rooms will be added dynamically
-room_locks = {}  # Mutex for each room to handle synchronized audio broadcasting
+rooms = {}  # Dictionary: { "room_name": [list_of_client_sockets] }
+room_locks = {}  # Dictionary: { "room_name": threading.Lock() } to control broadcasts
+broadcast_lock = threading.Lock()  # Global lock for broadcasting (alternative: per-room lock)
 
 def start():
     print("Server started, waiting for connections...")
@@ -26,9 +27,9 @@ def handle_new_connection(conn):
         welcome_msg = (
             "Available rooms:\n" +
             room_list +
-            "\n\nType an existing room name to join it, "
-            "or type 'NEW:<RoomName>' to create a new room:\n"
+            "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
         )
+
         conn.send(welcome_msg.encode('utf-8'))
 
         # Receive the room choice or new room request
@@ -45,13 +46,15 @@ def handle_new_connection(conn):
             # If room doesn't exist, create it
             if new_room_name not in rooms:
                 rooms[new_room_name] = []
-                room_locks[new_room_name] = threading.Lock()
-                conn.send(f"Room '{new_room_name}' created successfully.\n".encode('utf-8'))
+                room_locks[new_room_name] = threading.Lock()  # Create a lock for this new room
             room_choice = new_room_name
 
-        # If the chosen room does not exist and it's not a NEW request, handle error
+        # Check if the chosen room exists
         if room_choice not in rooms:
-            conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            if room_choice == "":
+                conn.send(b"No room chosen. Disconnecting.\n")
+            else:
+                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
             conn.close()
             return
 
@@ -68,15 +71,19 @@ def handle_new_connection(conn):
 def handle_client(conn, room_name):
     try:
         while True:
+            # Receive audio data from this client
             data = conn.recv(4096)
             if not data:
                 break
 
-            # Broadcast the data to all other clients in the same room
-            with room_locks[room_name]:  # Ensure synchronized access to the room
+            # Broadcast the data to all other clients in the same room without interleaving
+            # We use a mutex (lock) here to ensure no two broadcasts happen at once.
+            with broadcast_lock:
+                # Only one thread can enter this block at a time.
                 for cl in rooms[room_name]:
                     if cl != conn:
                         cl.send(data)
+
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
@@ -84,11 +91,12 @@ def handle_client(conn, room_name):
         if conn in rooms[room_name]:
             rooms[room_name].remove(conn)
         conn.close()
-
-        # Optional: if the room is empty, remove it from the dictionary
+        # If the room is empty, remove it
         if len(rooms[room_name]) == 0:
             del rooms[room_name]
-            del room_locks[room_name]  # Clean up the room lock
+            # Also delete the associated lock
+            if room_name in room_locks:
+                del room_locks[room_name]
         print(f"Client disconnected from room {room_name}")
 
 start()
