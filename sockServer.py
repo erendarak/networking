@@ -27,13 +27,15 @@ class HandleClientThread(Thread):
         self.chunk = 1024
         self.vsock = vsock
         self.vdata = vdata
+        self.name = None
+
+        # Attempt to receive and validate the username
         try:
-            # Attempt to receive and decode the username
             data = self.vsock.recv(self.chunk)
             self.name = data.decode('utf-8').strip()
+            if not self.name:
+                raise ValueError("Empty username")
             print(f"Client registered: {self.name}")
-            if not self.name:  # Ensure the username is not empty
-                raise ValueError("Username is empty or invalid")
         except (UnicodeDecodeError, ValueError) as e:
             print(f"Error during client registration: {e}")
             self.vsock.close()

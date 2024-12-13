@@ -24,7 +24,8 @@ class VoiceChatClient:
     def connect(self):
         try:
             self.client_socket.connect(self.server_address)
-            self.client_socket.send(self.username.encode())  # Send username to the server
+            # Send username as UTF-8 string
+            self.client_socket.sendall(self.username.encode('utf-8'))
             print(f"Connected to server at {self.server_address}")
         except Exception as e:
             print(f"Failed to connect: {e}")
