@@ -20,9 +20,10 @@ async def handler(websocket, path):
         # Remove the client on disconnect
         clients.remove(websocket)
 
-if __name__ == "__main__":
-    start_server = websockets.serve(handler, "0.0.0.0", 5000)
+async def main():
     print("WebRTC signaling server running on ws://0.0.0.0:5000")
+    async with websockets.serve(handler, "0.0.0.0", 5000):
+        await asyncio.Future()  # Keep the server running forever
 
-    asyncio.get_event_loop().run_until_complete(start_server)
-    asyncio.get_event_loop().run_forever()
+if __name__ == "__main__":
+    asyncio.run(main())
