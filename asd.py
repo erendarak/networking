@@ -2,23 +2,33 @@ import asyncio
 import websockets
 import json
 
-clients = set()
+clients = {}
 
-async def handler(websocket):
-    # Add the client to the set
-    clients.add(websocket)
+async def handler(websocket, path):
+    # Assign a unique ID to each client
+    client_id = id(websocket)
+    clients[client_id] = websocket
+    print(f"Client connected: {client_id}")
+
     try:
         async for message in websocket:
             data = json.loads(message)
-            # Relay messages to other clients
-            for client in clients:
-                if client != websocket:
-                    await client.send(json.dumps(data))
+
+            # Relay messages to the intended recipient or broadcast to all
+            if "to" in data:  # Send to a specific client
+                recipient_id = data["to"]
+                if recipient_id in clients:
+                    await clients[recipient_id].send(json.dumps(data))
+            else:  # Broadcast to all except the sender
+                for other_client_id, other_client_socket in clients.items():
+                    if other_client_id != client_id:
+                        await other_client_socket.send(json.dumps(data))
+
     except websockets.exceptions.ConnectionClosed:
-        pass
+        print(f"Client disconnected: {client_id}")
+
     finally:
-        # Remove the client on disconnect
-        clients.remove(websocket)
+        del clients[client_id]
 
 async def main():
     print("WebRTC signaling server running on ws://0.0.0.0:5000")
