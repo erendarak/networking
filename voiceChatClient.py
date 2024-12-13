@@ -5,7 +5,7 @@ import sys
 from collections import defaultdict
 
 port = 5000
-host = "18.185.136.12"  # Replace with your server's IP
+host = "63.176.92.177"  # Replace with your server's IP
 
 Format = pyaudio.paInt16
 Chunks = 4096
