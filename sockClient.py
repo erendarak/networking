@@ -8,9 +8,8 @@ CHANNELS = 1
 RATE = 44100
 
 class VoiceChatClient:
-    def __init__(self, host, port, username):
+    def __init__(self, host, port):
         self.server_address = (host, port)
-        self.username = username
         self.client_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
         self.audio = pyaudio.PyAudio()
         self.stream = self.audio.open(format=FORMAT,
@@ -24,8 +23,6 @@ class VoiceChatClient:
     def connect(self):
         try:
             self.client_socket.connect(self.server_address)
-            # Send username as UTF-8 string
-            self.client_socket.sendall(self.username.encode('utf-8'))
             print(f"Connected to server at {self.server_address}")
         except Exception as e:
             print(f"Failed to connect: {e}")
