@@ -1,5 +1,6 @@
 import socket
 import threading
+import struct
 
 port = 5000
 host = "0.0.0.0"
@@ -8,9 +9,20 @@ server = socket.socket()
 server.bind((host, port))
 server.listen(5)
 
-rooms = {}  # Dictionary: { "room_name": [list_of_client_sockets] }
-room_locks = {}  # Dictionary: { "room_name": threading.Lock() } to control broadcasts
-broadcast_lock = threading.Lock()  # Global lock for broadcasting (alternative: per-room lock)
+rooms = {}  # { room_name: [(conn, user_id), ...] }
+broadcast_lock = threading.Lock()  # Lock for broadcasting
+
+next_user_id = 1
+user_id_lock = threading.Lock()
+
+
+def get_next_user_id():
+    global next_user_id
+    with user_id_lock:
+        uid = next_user_id
+        next_user_id += 1
+    return uid
+
 
 def start():
     print("Server started, waiting for connections...")
@@ -20,16 +32,16 @@ def start():
         t = threading.Thread(target=handle_new_connection, args=(conn,))
         t.start()
 
+
 def handle_new_connection(conn):
     try:
         # Send the list of current rooms and instructions
         room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
         welcome_msg = (
-            "Available rooms:\n" +
-            room_list +
-            "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
+                "Available rooms:\n" +
+                room_list +
+                "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
         )
-
         conn.send(welcome_msg.encode('utf-8'))
 
         # Receive the room choice or new room request
@@ -46,7 +58,6 @@ def handle_new_connection(conn):
             # If room doesn't exist, create it
             if new_room_name not in rooms:
                 rooms[new_room_name] = []
-                room_locks[new_room_name] = threading.Lock()  # Create a lock for this new room
             room_choice = new_room_name
 
         # Check if the chosen room exists
@@ -58,17 +69,21 @@ def handle_new_connection(conn):
             conn.close()
             return
 
+        # Assign a unique user_id to this connection
+        user_id = get_next_user_id()
+
         # Add the client to the chosen room
-        rooms[room_choice].append(conn)
+        rooms[room_choice].append((conn, user_id))
         conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
 
-        handle_client(conn, room_choice)
+        handle_client(conn, room_choice, user_id)
 
     except Exception as e:
         print("Error in handle_new_connection:", e)
         conn.close()
 
-def handle_client(conn, room_name):
+
+def handle_client(conn, room_name, user_id):
     try:
         while True:
             # Receive audio data from this client
@@ -76,27 +91,28 @@ def handle_client(conn, room_name):
             if not data:
                 break
 
-            # Broadcast the data to all other clients in the same room without interleaving
-            # We use a mutex (lock) here to ensure no two broadcasts happen at once.
+            # Broadcast the data to all other clients in the same room
+            # Put the entire for-loop into the mutex
+            packet = struct.pack(">I", user_id) + data  # 4 bytes of user_id, then data
             with broadcast_lock:
-                # Only one thread can enter this block at a time.
-                for cl in rooms[room_name]:
+                # Broadcast to all others in the room
+                for cl, uid in rooms[room_name]:
                     if cl != conn:
-                        cl.send(data)
+                        cl.send(packet)
 
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
         # Remove the client from the room when disconnected
-        if conn in rooms[room_name]:
-            rooms[room_name].remove(conn)
+        for i, (cl, uid) in enumerate(rooms[room_name]):
+            if cl == conn:
+                del rooms[room_name][i]
+                break
         conn.close()
         # If the room is empty, remove it
         if len(rooms[room_name]) == 0:
             del rooms[room_name]
-            # Also delete the associated lock
-            if room_name in room_locks:
-                del room_locks[room_name]
         print(f"Client disconnected from room {room_name}")
+
 
 start()
