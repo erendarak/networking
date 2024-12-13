@@ -10,6 +10,7 @@ server.bind((host, port))
 server.listen(5)
 
 rooms = defaultdict(list)  # Dictionary to store room members
+buffers = defaultdict(lambda: defaultdict(bytes))  # Buffers for audio data
 
 
 def start():
@@ -76,8 +77,11 @@ def handle_client(conn, room_name):
             if not data:
                 break
 
-            # Broadcast the data to all other clients in the same room
-            distribute_audio(data, conn, room_name)
+            # Add received data to buffer
+            buffers[room_name][conn] = data
+
+            # Distribute the data to all other clients
+            distribute_audio(room_name, conn)
 
     except Exception as e:
         print("Error or disconnection:", e)
@@ -85,22 +89,26 @@ def handle_client(conn, room_name):
         # Remove the client from the room when disconnected
         if conn in rooms[room_name]:
             rooms[room_name].remove(conn)
+        if conn in buffers[room_name]:
+            del buffers[room_name][conn]
         conn.close()
         # If the room is empty, remove it
         if len(rooms[room_name]) == 0:
             del rooms[room_name]
+            del buffers[room_name]
         print(f"Client disconnected from room {room_name}")
 
 
-def distribute_audio(data, sender_conn, room_name):
+def distribute_audio(room_name, sender_conn):
     """
-    Distributes audio to all clients in the room except the sender.
-    Each client receives a mix of all other users' audio streams.
+    Sends a mix of all other clients' audio data to each client in the room.
     """
     for client in rooms[room_name]:
         if client != sender_conn:
             try:
-                client.send(data)
+                # Combine all other clients' buffers except the recipient's own
+                mixed_audio = b"".join(buffers[room_name][other] for other in buffers[room_name] if other != client)
+                client.send(mixed_audio)
             except Exception as e:
                 print("Error broadcasting to client:", e)
 

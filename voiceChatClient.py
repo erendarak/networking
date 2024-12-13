@@ -14,7 +14,6 @@ Rate = 44100
 
 # Global variables to control threads
 stop_audio_threads = False
-output_streams = defaultdict(lambda: None)  # Store output streams for each user
 
 
 def connect_to_server():
@@ -56,7 +55,6 @@ def audio_streaming(client):
     Each user's audio is handled independently and sent to others.
     """
     global stop_audio_threads
-    global output_streams
     stop_audio_threads = False
 
     p = pyaudio.PyAudio()
@@ -65,6 +63,12 @@ def audio_streaming(client):
                           rate=Rate,
                           input=True,
                           frames_per_buffer=Chunks)
+
+    output_stream = p.open(format=Format,
+                           channels=Channels,
+                           rate=Rate,
+                           output=True,
+                           frames_per_buffer=Chunks)
 
     def send_audio():
         while not stop_audio_threads:
@@ -81,15 +85,7 @@ def audio_streaming(client):
                 data = client.recv(Chunks)
                 if not data:
                     break
-
-                # Play incoming audio data
-                if threading.current_thread() not in output_streams:
-                    output_streams[threading.current_thread()] = p.open(format=Format,
-                                                                        channels=Channels,
-                                                                        rate=Rate,
-                                                                        output=True,
-                                                                        frames_per_buffer=Chunks)
-                output_streams[threading.current_thread()].write(data)
+                output_stream.write(data)
             except Exception as e:
                 print("Error in receiving audio:", e)
                 break
@@ -121,11 +117,8 @@ def audio_streaming(client):
 
     input_stream.stop_stream()
     input_stream.close()
-    for stream in output_streams.values():
-        if stream:
-            stream.stop_stream()
-            stream.close()
-    output_streams.clear()
+    output_stream.stop_stream()
+    output_stream.close()
     p.terminate()
 
 
