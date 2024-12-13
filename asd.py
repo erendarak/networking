@@ -4,7 +4,7 @@ import json
 
 clients = {}
 
-async def handler(websocket, path):
+async def handler(websocket):
     # Assign a unique ID to each client
     client_id = id(websocket)
     clients[client_id] = websocket
