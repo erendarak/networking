@@ -77,7 +77,7 @@ def handle_client(conn, room_name):
                 break
 
             # Broadcast the data to all other clients in the same room
-            broadcast_audio(data, conn, room_name)
+            distribute_audio(data, conn, room_name)
 
     except Exception as e:
         print("Error or disconnection:", e)
@@ -92,13 +92,16 @@ def handle_client(conn, room_name):
         print(f"Client disconnected from room {room_name}")
 
 
-def broadcast_audio(data, sender_conn, room_name):
+def distribute_audio(data, sender_conn, room_name):
+    """
+    Distributes audio to all clients in the room except the sender.
+    Each client receives a mix of all other users' audio streams.
+    """
     for client in rooms[room_name]:
         if client != sender_conn:
             try:
                 client.send(data)
             except Exception as e:
                 print("Error broadcasting to client:", e)
-
 
 start()

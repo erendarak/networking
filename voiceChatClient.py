@@ -2,9 +2,10 @@ import socket
 import threading
 import pyaudio
 import sys
+from collections import defaultdict
 
 port = 5000
-host = "63.176.92.177"  # Replace with your server's IP
+host = "18.185.136.12"  # Replace with your server's IP
 
 Format = pyaudio.paInt16
 Chunks = 4096
@@ -13,6 +14,7 @@ Rate = 44100
 
 # Global variables to control threads
 stop_audio_threads = False
+output_streams = defaultdict(lambda: None)  # Store output streams for each user
 
 
 def connect_to_server():
@@ -51,9 +53,10 @@ def choose_room(client):
 def audio_streaming(client):
     """
     Handles sending and receiving audio data.
-    Each user’s audio is mixed and sent individually to other users.
+    Each user's audio is handled independently and sent to others.
     """
     global stop_audio_threads
+    global output_streams
     stop_audio_threads = False
 
     p = pyaudio.PyAudio()
@@ -62,8 +65,6 @@ def audio_streaming(client):
                           rate=Rate,
                           input=True,
                           frames_per_buffer=Chunks)
-
-    output_streams = {}
 
     def send_audio():
         while not stop_audio_threads:
@@ -80,14 +81,15 @@ def audio_streaming(client):
                 data = client.recv(Chunks)
                 if not data:
                     break
-                # Write received audio to the output stream
-                if client not in output_streams:
-                    output_streams[client] = p.open(format=Format,
-                                                    channels=Channels,
-                                                    rate=Rate,
-                                                    output=True,
-                                                    frames_per_buffer=Chunks)
-                output_streams[client].write(data)
+
+                # Play incoming audio data
+                if threading.current_thread() not in output_streams:
+                    output_streams[threading.current_thread()] = p.open(format=Format,
+                                                                        channels=Channels,
+                                                                        rate=Rate,
+                                                                        output=True,
+                                                                        frames_per_buffer=Chunks)
+                output_streams[threading.current_thread()].write(data)
             except Exception as e:
                 print("Error in receiving audio:", e)
                 break
@@ -120,8 +122,10 @@ def audio_streaming(client):
     input_stream.stop_stream()
     input_stream.close()
     for stream in output_streams.values():
-        stream.stop_stream()
-        stream.close()
+        if stream:
+            stream.stop_stream()
+            stream.close()
+    output_streams.clear()
     p.terminate()
 
 
