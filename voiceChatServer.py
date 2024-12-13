@@ -1,9 +1,5 @@
 import socket
 import threading
-import struct
-import sys
-import gi
-gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GObject
 
 Gst.init(None)
