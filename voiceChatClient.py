@@ -1,26 +1,27 @@
 import socket
-import sys
-import json
-import asyncio
 import threading
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaPlayer
+import pyaudio
+import sys
 
-host = "54.93.170.220"
+host = "54.93.170.220"  # Sunucunun IP'si
 port = 5000
 
-Format = None
+Format = pyaudio.paInt16
 Chunks = 4096
 Channels = 1
 Rate = 44100
 
-def main():
+stop_audio_threads = False
+
+def connect_to_server():
     client = socket.socket()
     client.connect((host, port))
     welcome_message = client.recv(4096).decode('utf-8')
-    print(welcome_message)
+    return client, welcome_message
 
+def choose_room(client):
     while True:
+        print("---------- Main Menu ----------")
         choice = input("Type an existing room name to join, 'NEW:<RoomName>' to create a new room, or 'q' to quit: ").strip()
         if choice.lower() == 'q':
             client.close()
@@ -31,55 +32,88 @@ def main():
         print(response)
 
         if "Joined room:" in response:
-            break
+            return True
         elif "Invalid" in response or "does not exist" in response or "No room chosen" in response:
             if "Disconnecting" in response:
                 client.close()
-                return
+                return False
         elif "No rooms available" in response:
             pass
 
-    # Odaya girdik, şimdi WebRTC offer oluştur
-    pc = RTCPeerConnection()
+def audio_streaming(client):
+    global stop_audio_threads
+    stop_audio_threads = False
 
-    # Mikrofondan ses al
-    player = MediaPlayer("default", format="pulse", options={"channels":"1"})
-    for t in player.audio:
-        pc.addTrack(t)
+    p = pyaudio.PyAudio()
+    input_stream = p.open(format=Format,
+                          channels=Channels,
+                          rate=Rate,
+                          input=True,
+                          frames_per_buffer=Chunks)
+    output_stream = p.open(format=Format,
+                           channels=Channels,
+                           rate=Rate,
+                           output=True,
+                           frames_per_buffer=Chunks)
 
-    async def run_webrtc():
-        offer = await pc.createOffer()
-        await pc.setLocalDescription(offer)
-        # Offer'ı server'a gönder
-        off = {"type": pc.localDescription.type, "sdp": pc.localDescription.sdp}
-        client.send(json.dumps(off).encode('utf-8'))
+    def send_audio():
+        while not stop_audio_threads:
+            try:
+                data = input_stream.read(Chunks, exception_on_overflow=False)
+                client.sendall(data)
+            except:
+                break
 
-        # Server'dan answer bekle
-        data = client.recv(8192)
-        answer = json.loads(data.decode('utf-8'))
-        await pc.setRemoteDescription(RTCSessionDescription(answer["sdp"], answer["type"]))
+    def receive_audio():
+        while not stop_audio_threads:
+            try:
+                data = client.recv(8192) # 4096 örnek *2 bayt = 8192,
+                                         # sunucu miksleyip appsink'ten tam chunk alır.
+                if not data:
+                    break
+                output_stream.write(data)
+            except:
+                break
 
-    loop = asyncio.new_event_loop()
-    fut = asyncio.run_coroutine_threadsafe(run_webrtc(), loop)
-    threading.Thread(target=loop.run_forever, daemon=True).start()
-    fut.result()
+    def user_input():
+        global stop_audio_threads
+        while not stop_audio_threads:
+            command = sys.stdin.readline().strip().lower()
+            if command == "leave":
+                break
+        stop_audio_threads = True
+        try:
+            client.shutdown(socket.SHUT_RDWR)
+        except:
+            pass
+        client.close()
 
-    @pc.on("track")
-    def on_track(track):
-        print("Received track:", track.kind)
-        # Burada track'i hoparlöre verebilirsiniz.
-        # aiortc ile gelen track'i oynatmak için MediaBlackhole veya custom player kullanılabilir.
-        # Basitlik adına şu an direkt track'i işleme koymuyoruz.
+    t_send = threading.Thread(target=send_audio)
+    t_recv = threading.Thread(target=receive_audio)
+    t_input = threading.Thread(target=user_input)
 
-    # Client artık WebRTC üzerinden ses alışverişinde.
-    # 'leave' komutu girilene kadar bekleyelim.
-    while True:
-        command = sys.stdin.readline().strip().lower()
-        if command == "leave":
-            coro = pc.close()
-            asyncio.run_coroutine_threadsafe(coro, loop)
-            client.close()
-            break
+    t_send.start()
+    t_recv.start()
+    t_input.start()
+
+    t_send.join()
+    t_recv.join()
+
+    input_stream.stop_stream()
+    input_stream.close()
+    output_stream.stop_stream()
+    output_stream.close()
+    p.terminate()
+
+def main():
+    client, welcome_message = connect_to_server()
+    print(welcome_message)
+
+    joined = choose_room(client)
+    if not joined:
+        return
+
+    audio_streaming(client)
 
 if __name__ == "__main__":
     main()

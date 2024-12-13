@@ -1,148 +1,198 @@
 import socket
 import threading
-import asyncio
+import struct
 import sys
-import json
-from aiortc import RTCPeerConnection, RTCSessionDescription
-from aiortc.contrib.media import MediaStreamTrack, MediaRelay
+import gi
+gi.require_version('Gst', '1.0')
+from gi.repository import Gst, GObject
 
-port = 5000
-host = "0.0.0.0"
+Gst.init(None)
 
-server = socket.socket()
-server.bind((host, port))
-server.listen(5)
+HOST = "0.0.0.0"
+PORT = 5000
 
-rooms = {}  # "roomName": { "peers": [ (pc, conn), ... ], "relay": MediaRelay() }
+# rooms = { "roomName": { "clients": [conn, ...], "sources": {conn: appsrc}, "pipeline": Gst.Pipeline, "appsink": appsink } }
 
-# aiortc event loop
-loop = asyncio.new_event_loop()
-asyncio_thread = threading.Thread(target=loop.run_forever, daemon=True)
-asyncio_thread.start()
+rooms = {}
+lock = threading.Lock()
 
-def start():
-    print("Server started, waiting for connections...")
-    while True:
-        conn, addr = server.accept()
-        print(f"Client connected from {addr}")
-        t = threading.Thread(target=handle_new_connection, args=(conn,))
-        t.start()
+class VoiceChatServer:
+    def __init__(self, host, port):
+        self.host = host
+        self.port = port
+        self.server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.server.bind((self.host, self.port))
+        self.server.listen(5)
+        print(f"Server started on {self.host}:{self.port}")
 
-def handle_new_connection(conn):
-    try:
-        # Oda listesini gönder
-        room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
-        welcome_msg = (
+    def start(self):
+        while True:
+            conn, addr = self.server.accept()
+            print(f"Client connected from {addr}")
+            t = threading.Thread(target=self.handle_new_connection, args=(conn,))
+            t.start()
+
+    def handle_new_connection(self, conn):
+        try:
+            # Oda listesini gönder
+            room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
+            welcome_msg = (
                 "Available rooms:\n" +
                 room_list +
                 "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
-        )
-        conn.send(welcome_msg.encode('utf-8'))
+            )
+            conn.send(welcome_msg.encode('utf-8'))
 
-        # Oda seçimi
-        room_choice = conn.recv(1024).decode('utf-8').strip()
-        if room_choice.startswith("NEW:"):
-            new_room_name = room_choice.split("NEW:")[-1].strip()
-            if not new_room_name:
-                conn.send(b"Invalid room name. Disconnecting.\n")
+            room_choice = conn.recv(1024)
+            if not room_choice:
                 conn.close()
                 return
-            if new_room_name not in rooms:
-                rooms[new_room_name] = {"peers": [], "relay": MediaRelay()}
-            room_choice = new_room_name
+            room_choice = room_choice.decode('utf-8').strip()
 
-        if room_choice not in rooms:
-            if room_choice == "":
-                conn.send(b"No room chosen. Disconnecting.\n")
-            else:
-                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            if room_choice.startswith("NEW:"):
+                new_room_name = room_choice.split("NEW:")[-1].strip()
+                if not new_room_name:
+                    conn.send(b"Invalid room name. Disconnecting.\n")
+                    conn.close()
+                    return
+                with lock:
+                    if new_room_name not in rooms:
+                        # Oda oluştur ve pipeline kur
+                        rooms[new_room_name] = {
+                            "clients": [],
+                            "sources": {},
+                            "pipeline": None,
+                            "appsink": None
+                        }
+                        self.setup_pipeline(new_room_name)
+                room_choice = new_room_name
+
+            with lock:
+                if room_choice not in rooms:
+                    if room_choice == "":
+                        conn.send(b"No room chosen. Disconnecting.\n")
+                    else:
+                        msg = f"Room '{room_choice}' does not exist. Disconnecting.\n"
+                        conn.send(msg.encode('utf-8'))
+                    conn.close()
+                    return
+
+                # Odaya ekle
+                rooms[room_choice]["clients"].append(conn)
+
+            conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
+
+            # Her yeni client için bir appsrc oluştur
+            self.add_source_to_room(room_choice, conn)
+
+            self.handle_client(conn, room_choice)
+
+        except Exception as e:
+            print("Error in handle_new_connection:", e)
             conn.close()
-            return
 
-        conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
+    def setup_pipeline(self, room_name):
+        # GStreamer pipeline: appsrc*(N) -> audiomixer -> queue -> appsink
+        pipeline = Gst.Pipeline.new(None)
+        mixer = Gst.ElementFactory.make("audiomixer", "mixer")
+        appsink = Gst.ElementFactory.make("appsink", "sink")
+        appsink.set_property("emit-signals", True)
+        appsink.set_property("sync", False)
+        appsink.set_property("async", False)
+        appsink.connect("new-sample", self.on_new_sample, room_name)
 
-        # Oda içi WebRTC bağlantısını başlat
-        # Client offer bekle
-        data = conn.recv(4096)
-        # data JSON formatında: {"type": "offer", "sdp": "..."}
-        offer = json.loads(data.decode('utf-8'))
-        if offer["type"] != "offer":
-            conn.close()
-            return
+        queue = Gst.ElementFactory.make("queue", "queue")
 
-        # RTCPeerConnection oluştur
-        pc = RTCPeerConnection()
+        pipeline.add(mixer)
+        pipeline.add(queue)
+        pipeline.add(appsink)
 
-        # Odaya ekle
-        room = rooms[room_choice]
+        mixer.link(queue)
+        queue.link(appsink)
 
-        # Diğer peer'ların tracklerini bu peer'e ekle
-        for (other_pc, other_conn) in room["peers"]:
-            # Her existing pc’nin tracklerini buna ekle
-            # On_track eventinde eklenecek
-            pass
+        pipeline.set_state(Gst.State.PLAYING)
 
-        # Yeni PC’nin track event’i
-        @pc.on("track")
-        def on_track(track):
-            # Gelen track’i relay et
-            relay_track = room["relay"].subscribe(track)
-            # Bu track'i odadaki diğer peer'lere ekle
-            # (Her yeni track geldiğinde diğer peer'lere forward ediyoruz)
-            for (other_pc, other_conn) in room["peers"]:
-                other_pc.addTrack(relay_track)
+        rooms[room_name]["pipeline"] = pipeline
+        rooms[room_name]["appsink"] = appsink
 
-            # Aynı şekilde bu yeni pc'ye de odadaki eski trackleri eklememiz lazım.
-            # Ama eski trackler zaten @other_pc.on("track") ile ekleniyor.
-            # Burada basit tutuyoruz.
+    def add_source_to_room(self, room_name, conn):
+        # Her connection için bir appsrc oluştur
+        # PCM, 16bit, 1 kanal, 44100 Hz varsayılıyor
+        appsrc = Gst.ElementFactory.make("appsrc", None)
+        appsrc.set_property("format", Gst.Format.TIME)
+        appsrc.set_property("is-live", True)
+        appsrc.set_property("block", False)
+        # Caps: audio/x-raw, format=S16LE, channels=1, rate=44100
+        caps = Gst.Caps.from_string("audio/x-raw,format=S16LE,channels=1,rate=44100,layout=interleaved")
+        appsrc.set_property("caps", caps)
 
-        async def handle_webrtc():
-            # Offer alındı, setRemoteDescription
-            await pc.setRemoteDescription(RTCSessionDescription(offer["sdp"], offer["type"]))
+        pipeline = rooms[room_name]["pipeline"]
+        mixer = pipeline.get_by_name("mixer")
 
-            # Answer oluştur
-            answer = await pc.createAnswer()
-            await pc.setLocalDescription(answer)
+        pipeline.add(appsrc)
+        appsrc.link(mixer)
+        appsrc.set_state(Gst.State.PLAYING)
 
-            # Answer'ı client'a gönder
-            ans = {"type": pc.localDescription.type, "sdp": pc.localDescription.sdp}
-            ans_data = json.dumps(ans).encode('utf-8')
-            conn.send(ans_data)
+        rooms[room_name]["sources"][conn] = appsrc
 
-            # Odaya ekle
-            room["peers"].append((pc, conn))
+    def on_new_sample(self, appsink, room_name):
+        # appsink’ten veri al ve tüm client’lara gönder
+        sample = appsink.emit("pull-sample")
+        buf = sample.get_buffer()
+        success, mapinfo = buf.map(Gst.MapFlags.READ)
+        if success:
+            data = mapinfo.data
+            buf.unmap(mapinfo)
+            # Mikslenmiş veriyi odadaki tüm client’lara gönder
+            with lock:
+                for cl in rooms[room_name]["clients"]:
+                    try:
+                        cl.sendall(data)
+                    except:
+                        pass
+        return Gst.FlowReturn.OK
 
-        fut = asyncio.run_coroutine_threadsafe(handle_webrtc(), loop)
-        fut.result()
+    def handle_client(self, conn, room_name):
+        # Client’tan gelen ses verisini ilgili appsrc’ye push et
+        # Chunks = 4096 örnek, 16bit, 2 bayt * 4096 = 8192 bayt
+        # Burada client 1024 veya 4096 vb. okuyabilir, client tarafıyla uyumlu olsun.
+        try:
+            src = rooms[room_name]["sources"][conn]
+            while True:
+                data = conn.recv(4096)
+                if not data:
+                    break
+                # Gelen veriyi appsrc’ye push buffer
+                buf = Gst.Buffer.new_allocate(None, len(data), None)
+                buf.fill(0, data)
+                src.emit("push-buffer", buf)
 
-        # Artık WebRTC üzerinden ses akışı sağlanacak.
-        # Bu thread şimdilik burada kalabilir,
-        # Peer kapandığında pc kapatılır.
+        except Exception as e:
+            print("Error or disconnection:", e)
+        finally:
+            # Client ayrılıyor
+            with lock:
+                if conn in rooms[room_name]["clients"]:
+                    rooms[room_name]["clients"].remove(conn)
+                if conn in rooms[room_name]["sources"]:
+                    # Kaynağı pipeline’dan çıkar
+                    src = rooms[room_name]["sources"][conn]
+                    src.emit("end-of-stream")
+                    src.set_state(Gst.State.NULL)
+                    pipeline = rooms[room_name]["pipeline"]
+                    pipeline.remove(src)
+                    del rooms[room_name]["sources"][conn]
 
-        # Client disconnect olana kadar bekle
-        # WebRTC bağlantısı kesilince, peer'i odadan çıkar
-        while True:
-            # Burada normal bir bekleme yapıyoruz.
-            # Gerçekte peer connection kapandığında bir event yakalayıp odadan çıkarabilirsin.
-            # Şimdilik soket kapanınca çıkıyoruz.
-            chunk = conn.recv(1024)
-            if not chunk:
-                break
+                conn.close()
+                if len(rooms[room_name]["clients"]) == 0:
+                    # Oda boşaldı, pipeline durdur
+                    pipeline = rooms[room_name]["pipeline"]
+                    pipeline.set_state(Gst.State.NULL)
+                    del rooms[room_name]
 
-    except Exception as e:
-        print("Error in handle_new_connection:", e)
-    finally:
-        # Client ayrılıyor
-        # PC kapat
-        for (p, c) in rooms[room_choice]["peers"]:
-            if c == conn:
-                coro = p.close()
-                asyncio.run_coroutine_threadsafe(coro, loop)
-                rooms[room_choice]["peers"].remove((p, c))
-                break
-        conn.close()
-        if len(rooms[room_choice]["peers"]) == 0:
-            del rooms[room_choice]
-        print(f"Client disconnected from room {room_choice}")
+            print(f"Client disconnected from room {room_name}")
 
-start()
+
+if __name__ == "__main__":
+    server = VoiceChatServer(HOST, PORT)
+    server.start()
