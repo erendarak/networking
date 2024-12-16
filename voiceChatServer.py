@@ -67,10 +67,14 @@ def handle_client(conn, room_name):
             if not data:
                 break
 
+            # Ignore heartbeat messages
+            if data == b"HEARTBEAT":
+                continue
+
             client_id = audio_channels[room_name][conn]
             broadcast_to_room(conn, room_name, data, client_id)
-    except Exception as e:
-        print("Error or disconnection:", e)
+    except (ConnectionResetError, BrokenPipeError):
+        print(f"Client disconnected abruptly from room {room_name}")
     finally:
         remove_client(conn, room_name)
 
@@ -79,7 +83,11 @@ def broadcast_to_room(sender_conn, room_name, data, client_id):
     try:
         for client_conn in rooms[room_name]:
             if client_conn != sender_conn:
-                client_conn.send(f"{client_id}|".encode('utf-8') + data)
+                try:
+                    client_conn.send(f"{client_id}|".encode('utf-8') + data)
+                except (BrokenPipeError, ConnectionResetError):
+                    print(f"Removing client due to broken pipe: {client_conn}")
+                    remove_client(client_conn, room_name)
     except Exception as e:
         print(f"Error in broadcast_to_room: {e}")
 

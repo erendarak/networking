@@ -2,6 +2,7 @@ import socket
 import threading
 import pyaudio
 import sys
+import time
 
 host = "18.195.99.124"
 port = 5000
@@ -62,13 +63,24 @@ def audio_streaming(client):
                     break
 
                 # Parse the client ID and audio data
-                client_id, audio_data = data.split(b"|", 1)
-                client_id = int(client_id.decode('utf-8'))
+                try:
+                    client_id, audio_data = data.split(b"|", 1)
+                    client_id = int(client_id.decode('utf-8'))
 
-                if client_id not in output_streams:
-                    output_streams[client_id] = p.open(format=Format, channels=Channels, rate=Rate, output=True, frames_per_buffer=Chunks)
+                    if client_id not in output_streams:
+                        output_streams[client_id] = p.open(format=Format, channels=Channels, rate=Rate, output=True, frames_per_buffer=Chunks)
 
-                output_streams[client_id].write(audio_data)
+                    output_streams[client_id].write(audio_data)
+                except ValueError:
+                    print("Error parsing audio data")
+            except:
+                break
+
+    def send_heartbeat():
+        while not stop_audio_threads:
+            try:
+                client.send(b"HEARTBEAT")
+                time.sleep(5)
             except:
                 break
 
@@ -78,16 +90,17 @@ def audio_streaming(client):
             command = sys.stdin.readline().strip().lower()
             if command == "leave":
                 break
-
         stop_audio_threads = True
         client.close()
 
     t_send = threading.Thread(target=send_audio)
     t_recv = threading.Thread(target=receive_audio)
+    t_heartbeat = threading.Thread(target=send_heartbeat)
     t_input = threading.Thread(target=user_input)
 
     t_send.start()
     t_recv.start()
+    t_heartbeat.start()
     t_input.start()
 
     t_send.join()
