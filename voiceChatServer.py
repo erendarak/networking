@@ -6,11 +6,12 @@ port = 5000
 host = "0.0.0.0"
 
 server = socket.socket()
+server.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # Enable TCP keep-alive
 server.bind((host, port))
 server.listen(5)
 
-rooms = {}
-audio_channels = {}
+rooms = {}  # Dictionary to store rooms and their clients
+audio_channels = {}  # Dictionary to store individual audio channels per room
 
 
 def start():
@@ -57,7 +58,7 @@ def handle_new_connection(conn):
 
         handle_client(conn, room_choice)
     except Exception as e:
-        print("Error in handle_new_connection:", e)
+        print(f"Error in handle_new_connection: {e}")
         conn.close()
 
 
@@ -71,9 +72,15 @@ def handle_client(conn, room_name):
             client_id, frame_size = struct.unpack('!II', header)  # Unpack header
             audio_data = conn.recv(frame_size)
 
+            if not audio_data or len(audio_data) != frame_size:
+                print(f"Incomplete audio frame received: expected {frame_size} bytes, got {len(audio_data)}")
+                break
+
             broadcast_to_room(conn, room_name, client_id, audio_data)
-    except (ConnectionResetError, BrokenPipeError):
-        print(f"Client disconnected abruptly from room {room_name}")
+    except (ConnectionResetError, BrokenPipeError) as e:
+        print(f"Client abruptly disconnected: {e}")
+    except Exception as e:
+        print(f"Unexpected error in handle_client: {e}")
     finally:
         remove_client(conn, room_name)
 

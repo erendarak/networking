@@ -18,6 +18,7 @@ stop_audio_threads = False
 
 def connect_to_server():
     client = socket.socket()
+    client.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # Enable TCP keep-alive
     client.connect((host, port))
     welcome_message = client.recv(4096).decode('utf-8')
     return client, welcome_message
@@ -54,7 +55,8 @@ def audio_streaming(client):
                 data = input_stream.read(Chunks, exception_on_overflow=False)
                 header = struct.pack('!II', 0, len(data))  # Client ID is 0 for simplicity
                 client.send(header + data)
-            except:
+            except Exception as e:
+                print(f"Error sending audio: {e}")
                 break
 
     def receive_audio():
@@ -62,17 +64,23 @@ def audio_streaming(client):
             try:
                 header = client.recv(8)  # Header size: 8 bytes
                 if not header:
+                    print("Server closed the connection.")
                     break
 
                 client_id, frame_size = struct.unpack('!II', header)
                 audio_data = client.recv(frame_size)
+
+                if not audio_data or len(audio_data) != frame_size:
+                    print(f"Incomplete audio frame received: expected {frame_size} bytes, got {len(audio_data)}")
+                    continue
 
                 if client_id not in output_streams:
                     output_streams[client_id] = p.open(format=Format, channels=Channels, rate=Rate, output=True, frames_per_buffer=Chunks)
 
                 output_streams[client_id].write(audio_data)
             except Exception as e:
-                print("Error parsing audio data:", e)
+                print(f"Error parsing audio data: {e}")
+                break
 
     def send_heartbeat():
         while not stop_audio_threads:
@@ -126,3 +134,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+
