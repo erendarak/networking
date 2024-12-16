@@ -1,18 +1,16 @@
 import socket
 import threading
-import struct
 
 port = 5000
 host = "0.0.0.0"
 
-server = socket.socket()
-server.setsockopt(socket.SOL_SOCKET, socket.SO_KEEPALIVE, 1)  # Enable TCP keep-alive
+server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
 server.bind((host, port))
 server.listen(5)
 
-rooms = {}  # Dictionary to store rooms and their clients
-audio_channels = {}  # Dictionary to store individual audio channels per room
-
+rooms = {}  # Dictionary: {room_name: [ (conn, client_id), (conn, client_id), ... ] }
+client_id_counter = 0
+broadcast_lock = threading.Lock()  # lock for broadcasting data
 
 def start():
     print("Server started, waiting for connections...")
@@ -22,9 +20,9 @@ def start():
         t = threading.Thread(target=handle_new_connection, args=(conn,))
         t.start()
 
-
 def handle_new_connection(conn):
     try:
+        # Send the list of current rooms and instructions
         room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
         welcome_msg = (
             "Available rooms:\n" +
@@ -33,79 +31,72 @@ def handle_new_connection(conn):
         )
         conn.send(welcome_msg.encode('utf-8'))
 
+        # Receive the room choice or new room request
         room_choice = conn.recv(1024).decode('utf-8').strip()
 
+        # Handle new room creation
         if room_choice.startswith("NEW:"):
             new_room_name = room_choice.split("NEW:")[-1].strip()
             if not new_room_name:
                 conn.send(b"Invalid room name. Disconnecting.\n")
                 conn.close()
                 return
+
+            # If room doesn't exist, create it
             if new_room_name not in rooms:
                 rooms[new_room_name] = []
-                audio_channels[new_room_name] = {}
             room_choice = new_room_name
 
+        # If the chosen room does not exist and not a NEW request, handle error
         if room_choice not in rooms:
-            conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            if room_choice == "":
+                conn.send(b"No room chosen. Disconnecting.\n")
+            else:
+                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
             conn.close()
             return
 
-        rooms[room_choice].append(conn)
-        client_id = len(audio_channels[room_choice]) + 1
-        audio_channels[room_choice][conn] = client_id
-        conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
+        # Assign a unique client ID
+        global client_id_counter
+        client_id_counter += 1
+        this_client_id = client_id_counter
 
-        handle_client(conn, room_choice)
+        # Add the client to the chosen room
+        rooms[room_choice].append((conn, this_client_id))
+        conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
+        # Send the client their ID
+        conn.send(f"ID:{this_client_id}\n".encode('utf-8'))
+
+        handle_client(conn, room_choice, this_client_id)
+
     except Exception as e:
-        print(f"Error in handle_new_connection: {e}")
+        print("Error in handle_new_connection:", e)
         conn.close()
 
-
-def handle_client(conn, room_name):
+def handle_client(conn, room_name, client_id):
     try:
         while True:
-            header = conn.recv(8)  # Header size: 8 bytes (4 bytes client_id, 4 bytes frame_size)
-            if not header:
+            data = conn.recv(4096)
+            if not data:
                 break
+            # Broadcast the data to all other clients in the same room
+            with broadcast_lock:
+                for cl, cl_id in rooms[room_name]:
+                    if cl != conn:
+                        # Send data with the format: DATA:<client_id>:<raw audio>
+                        # This ensures the receivers know who sent it.
+                        cl.send(b"DATA:" + str(client_id).encode('utf-8') + b":" + data)
 
-            client_id, frame_size = struct.unpack('!II', header)  # Unpack header
-            audio_data = conn.recv(frame_size)
-
-            if not audio_data or len(audio_data) != frame_size:
-                print(f"Incomplete audio frame received: expected {frame_size} bytes, got {len(audio_data)}")
-                break
-
-            broadcast_to_room(conn, room_name, client_id, audio_data)
-    except (ConnectionResetError, BrokenPipeError) as e:
-        print(f"Client abruptly disconnected: {e}")
     except Exception as e:
-        print(f"Unexpected error in handle_client: {e}")
+        print("Error or disconnection:", e)
     finally:
-        remove_client(conn, room_name)
-
-
-def broadcast_to_room(sender_conn, room_name, client_id, audio_data):
-    for client_conn in rooms[room_name]:
-        if client_conn != sender_conn:
-            try:
-                header = struct.pack('!II', client_id, len(audio_data))
-                client_conn.send(header + audio_data)
-            except (BrokenPipeError, ConnectionResetError):
-                print(f"Removing client due to broken pipe: {client_conn}")
-                remove_client(client_conn, room_name)
-
-
-def remove_client(conn, room_name):
-    if conn in rooms[room_name]:
-        rooms[room_name].remove(conn)
-    if conn in audio_channels[room_name]:
-        del audio_channels[room_name][conn]
-    conn.close()
-    if len(rooms[room_name]) == 0:
-        del rooms[room_name]
-        del audio_channels[room_name]
-    print(f"Client disconnected from room {room_name}")
-
+        # Remove the client from the room when disconnected
+        if (conn, client_id) in rooms[room_name]:
+            rooms[room_name].remove((conn, client_id))
+        conn.close()
+        # Optional: if the room is empty, you could remove it from the dictionary
+        if len(rooms[room_name]) == 0:
+            del rooms[room_name]
+        print(f"Client {client_id} disconnected from room {room_name}")
 
 start()
