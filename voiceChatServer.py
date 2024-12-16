@@ -1,5 +1,6 @@
 import socket
 import threading
+import struct
 
 port = 5000
 host = "0.0.0.0"
@@ -8,8 +9,8 @@ server = socket.socket()
 server.bind((host, port))
 server.listen(5)
 
-rooms = {}  # Dictionary to store rooms and their clients
-audio_channels = {}  # Dictionary to store individual audio channels per room
+rooms = {}
+audio_channels = {}
 
 
 def start():
@@ -41,7 +42,7 @@ def handle_new_connection(conn):
                 return
             if new_room_name not in rooms:
                 rooms[new_room_name] = []
-                audio_channels[new_room_name] = {}  # Create audio channels for the new room
+                audio_channels[new_room_name] = {}
             room_choice = new_room_name
 
         if room_choice not in rooms:
@@ -51,7 +52,7 @@ def handle_new_connection(conn):
 
         rooms[room_choice].append(conn)
         client_id = len(audio_channels[room_choice]) + 1
-        audio_channels[room_choice][conn] = client_id  # Assign a unique channel to the client
+        audio_channels[room_choice][conn] = client_id
         conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
 
         handle_client(conn, room_choice)
@@ -63,33 +64,29 @@ def handle_new_connection(conn):
 def handle_client(conn, room_name):
     try:
         while True:
-            data = conn.recv(4096)
-            if not data:
+            header = conn.recv(8)  # Header size: 8 bytes (4 bytes client_id, 4 bytes frame_size)
+            if not header:
                 break
 
-            # Ignore heartbeat messages
-            if data == b"HEARTBEAT":
-                continue
+            client_id, frame_size = struct.unpack('!II', header)  # Unpack header
+            audio_data = conn.recv(frame_size)
 
-            client_id = audio_channels[room_name][conn]
-            broadcast_to_room(conn, room_name, data, client_id)
+            broadcast_to_room(conn, room_name, client_id, audio_data)
     except (ConnectionResetError, BrokenPipeError):
         print(f"Client disconnected abruptly from room {room_name}")
     finally:
         remove_client(conn, room_name)
 
 
-def broadcast_to_room(sender_conn, room_name, data, client_id):
-    try:
-        for client_conn in rooms[room_name]:
-            if client_conn != sender_conn:
-                try:
-                    client_conn.send(f"{client_id}|".encode('utf-8') + data)
-                except (BrokenPipeError, ConnectionResetError):
-                    print(f"Removing client due to broken pipe: {client_conn}")
-                    remove_client(client_conn, room_name)
-    except Exception as e:
-        print(f"Error in broadcast_to_room: {e}")
+def broadcast_to_room(sender_conn, room_name, client_id, audio_data):
+    for client_conn in rooms[room_name]:
+        if client_conn != sender_conn:
+            try:
+                header = struct.pack('!II', client_id, len(audio_data))
+                client_conn.send(header + audio_data)
+            except (BrokenPipeError, ConnectionResetError):
+                print(f"Removing client due to broken pipe: {client_conn}")
+                remove_client(client_conn, room_name)
 
 
 def remove_client(conn, room_name):

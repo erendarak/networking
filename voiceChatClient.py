@@ -1,8 +1,9 @@
 import socket
 import threading
 import pyaudio
-import sys
+import struct
 import time
+import sys
 
 host = "18.195.99.124"
 port = 5000
@@ -51,30 +52,27 @@ def audio_streaming(client):
         while not stop_audio_threads:
             try:
                 data = input_stream.read(Chunks, exception_on_overflow=False)
-                client.send(data)
+                header = struct.pack('!II', 0, len(data))  # Client ID is 0 for simplicity
+                client.send(header + data)
             except:
                 break
 
     def receive_audio():
         while not stop_audio_threads:
             try:
-                data = client.recv(Chunks + 10)
-                if not data:
+                header = client.recv(8)  # Header size: 8 bytes
+                if not header:
                     break
 
-                # Parse the client ID and audio data
-                try:
-                    client_id, audio_data = data.split(b"|", 1)
-                    client_id = int(client_id.decode('utf-8'))
+                client_id, frame_size = struct.unpack('!II', header)
+                audio_data = client.recv(frame_size)
 
-                    if client_id not in output_streams:
-                        output_streams[client_id] = p.open(format=Format, channels=Channels, rate=Rate, output=True, frames_per_buffer=Chunks)
+                if client_id not in output_streams:
+                    output_streams[client_id] = p.open(format=Format, channels=Channels, rate=Rate, output=True, frames_per_buffer=Chunks)
 
-                    output_streams[client_id].write(audio_data)
-                except ValueError:
-                    print("Error parsing audio data")
-            except:
-                break
+                output_streams[client_id].write(audio_data)
+            except Exception as e:
+                print("Error parsing audio data:", e)
 
     def send_heartbeat():
         while not stop_audio_threads:
