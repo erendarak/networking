@@ -1,8 +1,6 @@
 import socket
 import threading
-import collections
 
-# Server configuration
 port = 5000
 host = "0.0.0.0"
 
@@ -10,20 +8,21 @@ server = socket.socket()
 server.bind((host, port))
 server.listen(5)
 
-# Rooms and thread locks
-rooms = {}  # {room_name: [clients]}
-locks = collections.defaultdict(threading.Lock)  # One lock per room
+rooms = {}  # Dictionary to store rooms and their clients
+audio_channels = {}  # Dictionary to store individual audio channels per room
+
 
 def start():
     print("Server started, waiting for connections...")
     while True:
         conn, addr = server.accept()
         print(f"Client connected from {addr}")
-        threading.Thread(target=handle_new_connection, args=(conn,)).start()
+        t = threading.Thread(target=handle_new_connection, args=(conn,))
+        t.start()
+
 
 def handle_new_connection(conn):
     try:
-        # Send the list of current rooms and instructions
         room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
         welcome_msg = (
             "Available rooms:\n" +
@@ -32,7 +31,6 @@ def handle_new_connection(conn):
         )
         conn.send(welcome_msg.encode('utf-8'))
 
-        # Receive the room choice or new room request
         room_choice = conn.recv(1024).decode('utf-8').strip()
 
         if room_choice.startswith("NEW:"):
@@ -41,10 +39,9 @@ def handle_new_connection(conn):
                 conn.send(b"Invalid room name. Disconnecting.\n")
                 conn.close()
                 return
-
-            with locks[new_room_name]:  # Ensure thread-safe room creation
-                if new_room_name not in rooms:
-                    rooms[new_room_name] = []
+            if new_room_name not in rooms:
+                rooms[new_room_name] = []
+                audio_channels[new_room_name] = {}  # Create audio channels for the new room
             room_choice = new_room_name
 
         if room_choice not in rooms:
@@ -52,14 +49,16 @@ def handle_new_connection(conn):
             conn.close()
             return
 
-        with locks[room_choice]:
-            rooms[room_choice].append(conn)
+        rooms[room_choice].append(conn)
+        client_id = len(audio_channels[room_choice]) + 1
+        audio_channels[room_choice][conn] = client_id  # Assign a unique channel to the client
         conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
 
         handle_client(conn, room_choice)
     except Exception as e:
         print("Error in handle_new_connection:", e)
         conn.close()
+
 
 def handle_client(conn, room_name):
     try:
@@ -68,22 +67,33 @@ def handle_client(conn, room_name):
             if not data:
                 break
 
-            with locks[room_name]:  # Ensure thread-safe broadcast
-                for cl in rooms[room_name]:
-                    if cl != conn:
-                        try:
-                            cl.send(data)
-                        except Exception as e:
-                            print(f"Error sending to client: {e}")
+            client_id = audio_channels[room_name][conn]
+            broadcast_to_room(conn, room_name, data, client_id)
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
-        with locks[room_name]:
-            if conn in rooms[room_name]:
-                rooms[room_name].remove(conn)
-            if not rooms[room_name]:
-                del rooms[room_name]
-        conn.close()
-        print(f"Client disconnected from room {room_name}")
+        remove_client(conn, room_name)
+
+
+def broadcast_to_room(sender_conn, room_name, data, client_id):
+    try:
+        for client_conn in rooms[room_name]:
+            if client_conn != sender_conn:
+                client_conn.send(f"{client_id}|".encode('utf-8') + data)
+    except Exception as e:
+        print(f"Error in broadcast_to_room: {e}")
+
+
+def remove_client(conn, room_name):
+    if conn in rooms[room_name]:
+        rooms[room_name].remove(conn)
+    if conn in audio_channels[room_name]:
+        del audio_channels[room_name][conn]
+    conn.close()
+    if len(rooms[room_name]) == 0:
+        del rooms[room_name]
+        del audio_channels[room_name]
+    print(f"Client disconnected from room {room_name}")
+
 
 start()
