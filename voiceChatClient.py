@@ -98,12 +98,15 @@ class VoiceChatApp:
                 self.client = socket.socket()
                 self.client.settimeout(10)  # Timeout for connection
                 self.client.connect((host, port))
-                welcome_message = self.client.recv(4096).decode('utf-8')
-                if "Welcome" in welcome_message:
+                welcome_message = self.client.recv(4096).decode('utf-8').strip()
+
+                print(f"Server response: {welcome_message}")  # Debugging
+
+                if "Welcome to the Voice Chat Server" in welcome_message:
                     self.handle_server_message(welcome_message)
                     self.setup_second_page()
                 else:
-                    raise Exception("Invalid server response")
+                    raise Exception(f"Unexpected server response: {welcome_message}")
             except socket.timeout:
                 messagebox.showerror("Error", "Connection timed out. Server might be unreachable.")
             except Exception as e:

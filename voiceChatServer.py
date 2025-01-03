@@ -41,9 +41,10 @@ def handle_client(client_socket, address):
             client_id = client_id_counter
             client_id_counter += 1
 
-        # Send client ID to the client
+        # Send client ID and welcome message
         client_socket.sendall(f"{ID_PREFIX}{client_id}\n".encode("utf-8"))
-        client_socket.sendall(WELCOME_MESSAGE.encode("utf-8"))
+        client_socket.sendall(f"{WELCOME_MESSAGE}\n".encode("utf-8"))
+        print(f"Sent welcome message to client {client_id} at {address}")
 
         while True:
             line = client_socket_file.readline().strip()
@@ -52,7 +53,6 @@ def handle_client(client_socket, address):
 
             message = line.decode("utf-8")
 
-            # Room management commands
             # Room management commands
             if message.startswith("NEW:"):
                 room_name = message.split("NEW:")[1]
@@ -63,31 +63,20 @@ def handle_client(client_socket, address):
                     rooms[room_name][client_id] = client_socket
                     current_room = room_name
                     client_socket.sendall(f"Joined room: {room_name}\n".encode("utf-8"))
+
+            elif message == "LIST_ROOMS":
+                room_list = ",".join(rooms.keys())
+                client_socket.sendall(f"{room_list}\n".encode("utf-8"))
+
             elif message in rooms:
                 if current_room:
                     del rooms[current_room][client_id]
                 rooms[message][client_id] = client_socket
                 current_room = message
                 client_socket.sendall(f"Joined room: {message}\n".encode("utf-8"))
+
             else:
                 client_socket.sendall(f"Unknown command or room: {message}\n".encode("utf-8"))
-
-        # Audio data handling
-        while True:
-            header_line = client_socket_file.readline()
-            if not header_line:
-                break
-            header_line = header_line.strip()
-
-            if header_line.startswith(b"DATA:"):
-                parts = header_line.decode("utf-8").split(":")
-                if len(parts) == 3:
-                    _, sender_id_str, length_str = parts
-                    sender_id = int(sender_id_str)
-                    length = int(length_str)
-                    audio_data = client_socket_file.read(length)
-                    if len(audio_data) == length:
-                        broadcast_to_room(current_room, sender_id, audio_data)
 
     except Exception as e:
         print(f"Error with client {client_id} at {address}: {e}")
@@ -96,6 +85,7 @@ def handle_client(client_socket, address):
             del rooms[current_room][client_id]
         client_socket.close()
         print(f"Client {client_id} at {address} disconnected.")
+
 
 def server_listener():
     """Main server listener loop to accept new connections."""
