@@ -41,10 +41,13 @@ def handle_client(client_socket, address):
             client_id = client_id_counter
             client_id_counter += 1
 
-        # Send client ID and welcome message
-        client_socket.sendall(f"{ID_PREFIX}{client_id}\n".encode("utf-8"))
+        # Send welcome message FIRST
         client_socket.sendall(f"{WELCOME_MESSAGE}\n".encode("utf-8"))
         print(f"Sent welcome message to client {client_id} at {address}")
+
+        # Then send client ID
+        client_socket.sendall(f"{ID_PREFIX}{client_id}\n".encode("utf-8"))
+        print(f"Sent client ID: {client_id} to client at {address}")
 
         while True:
             line = client_socket_file.readline().strip()
@@ -85,6 +88,7 @@ def handle_client(client_socket, address):
             del rooms[current_room][client_id]
         client_socket.close()
         print(f"Client {client_id} at {address} disconnected.")
+
 
 
 def server_listener():
