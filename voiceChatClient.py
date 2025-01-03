@@ -99,17 +99,20 @@ class VoiceChatApp:
                 self.client.settimeout(10)  # Timeout for connection
                 self.client.connect((host, port))
 
-                # First, expect the welcome message
+                # Wait for USERNAME_REQUEST
+                initial_response = self.client.recv(4096).decode('utf-8').strip()
+                print(f"Server initial response: {initial_response}")
+                if initial_response != "USERNAME_REQUEST":
+                    raise Exception(f"Unexpected server response: {initial_response}")
+
+                # Send username
+                self.client.sendall(username.encode('utf-8'))
+
+                # Wait for Welcome Message
                 welcome_message = self.client.recv(4096).decode('utf-8').strip()
                 print(f"Server response (Welcome): {welcome_message}")
-                if "Welcome to the Voice Chat Server" not in welcome_message:
+                if "Welcome" not in welcome_message:
                     raise Exception(f"Unexpected server response: {welcome_message}")
-
-                # Then, expect the client ID
-                client_id_response = self.client.recv(4096).decode('utf-8').strip()
-                print(f"Server response (ID): {client_id_response}")
-                if not client_id_response.startswith("ID:"):
-                    raise Exception(f"Invalid client ID response: {client_id_response}")
 
                 self.handle_server_message(welcome_message)
                 self.setup_second_page()

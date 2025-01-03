@@ -21,13 +21,14 @@ WELCOME_MESSAGE = "Welcome to the Voice Chat Server! Available Commands:\n" \
 def handle_new_connection(conn):
     try:
         # Step 1: Receive Username
-        conn.send(b"Please enter your username:\n")
+        conn.send(b"USERNAME_REQUEST\n")
         username = conn.recv(1024).decode('utf-8').strip()
         if not username:
             conn.send(b"Invalid username. Disconnecting.\n")
             conn.close()
             return
 
+        # Step 2: Send Welcome Message
         room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
         welcome_msg = (
             f"Welcome, {username}!\nAvailable rooms:\n" +
@@ -36,6 +37,7 @@ def handle_new_connection(conn):
         )
         conn.send(welcome_msg.encode('utf-8'))
 
+        # Step 3: Handle Room Selection
         room_choice = conn.recv(1024).decode('utf-8').strip()
 
         if room_choice.startswith("NEW:"):
@@ -56,6 +58,7 @@ def handle_new_connection(conn):
             conn.close()
             return
 
+        # Step 4: Assign Client ID
         global client_id_counter
         with client_lock:
             client_id_counter += 1
@@ -70,6 +73,7 @@ def handle_new_connection(conn):
     except Exception as e:
         print("Error in handle_new_connection:", e)
         conn.close()
+
 
 def handle_client(conn, room_name, client_id, username):
     try:
