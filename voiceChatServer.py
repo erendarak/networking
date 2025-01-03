@@ -53,6 +53,7 @@ def handle_client(client_socket, address):
             message = line.decode("utf-8")
 
             # Room management commands
+            # Room management commands
             if message.startswith("NEW:"):
                 room_name = message.split("NEW:")[1]
                 if room_name in rooms:
@@ -61,7 +62,7 @@ def handle_client(client_socket, address):
                     rooms[room_name] = {}
                     rooms[room_name][client_id] = client_socket
                     current_room = room_name
-                    client_socket.sendall(f"Created and joined room: {room_name}\n".encode("utf-8"))
+                    client_socket.sendall(f"Joined room: {room_name}\n".encode("utf-8"))
             elif message in rooms:
                 if current_room:
                     del rooms[current_room][client_id]

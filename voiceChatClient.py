@@ -7,7 +7,7 @@ from collections import deque
 import time
 
 # Audio and network settings
-host = "3.126.85.251"
+host = "3.66.212.112"
 port = 5000
 
 Format = pyaudio.paInt16
@@ -96,11 +96,14 @@ class VoiceChatApp:
         def connect():
             try:
                 self.client = socket.socket()
-                self.client.settimeout(10)  # Set a timeout for the connection
+                self.client.settimeout(10)  # Timeout for connection
                 self.client.connect((host, port))
                 welcome_message = self.client.recv(4096).decode('utf-8')
-                self.handle_server_message(welcome_message)
-                self.setup_second_page()
+                if "Welcome" in welcome_message:
+                    self.handle_server_message(welcome_message)
+                    self.setup_second_page()
+                else:
+                    raise Exception("Invalid server response")
             except socket.timeout:
                 messagebox.showerror("Error", "Connection timed out. Server might be unreachable.")
             except Exception as e:
@@ -145,12 +148,16 @@ class VoiceChatApp:
             return
 
         try:
-            self.client.send(selected_room.encode('utf-8'))
+            self.client.sendall(selected_room.encode('utf-8'))
             response = self.client.recv(4096).decode('utf-8')
             self.handle_server_message(response)
             if "Joined room" in response:
                 self.current_room = selected_room
                 self.start_audio_streaming()
+            else:
+                messagebox.showerror("Error", f"Failed to join room: {response}")
+        except socket.timeout:
+            messagebox.showerror("Error", "Request timed out. Server might not be responding.")
         except Exception as e:
             messagebox.showerror("Error", f"Failed to join room: {e}")
 
