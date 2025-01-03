@@ -6,9 +6,10 @@ host = "0.0.0.0"  # Listen on all available interfaces
 port = 5000
 
 # Rooms and clients
-rooms = defaultdict(dict)  # Room name -> {client_id: client_socket}
+rooms = defaultdict(list)  # Room name -> List of (client_socket, client_id)
 client_id_counter = 0
 client_lock = threading.Lock()
+broadcast_lock = threading.Lock()
 
 # Constants for protocol
 DATA_PREFIX = "DATA:"
@@ -17,79 +18,76 @@ WELCOME_MESSAGE = "Welcome to the Voice Chat Server! Available Commands:\n" \
                   "- NEW:<RoomName> to create a room\n" \
                   "- Join an existing room by typing the room name."
 
-def broadcast_to_room(room_name, sender_id, data):
-    """Send audio data to all clients in the room except the sender."""
-    if room_name in rooms:
-        for client_id, client_socket in rooms[room_name].items():
-            if client_id != sender_id:
-                try:
-                    header = f"{DATA_PREFIX}{sender_id}:{len(data)}\n".encode("utf-8")
-                    client_socket.sendall(header + data)
-                except Exception as e:
-                    print(f"Error sending to client {client_id}: {e}")
-
-def handle_client(client_socket, address):
-    global client_id_counter
-
-    client_id = None
-    current_room = None
-    client_socket_file = client_socket.makefile('rb')
-
+def handle_new_connection(conn):
     try:
-        # Assign a unique client ID
-        with client_lock:
-            client_id = client_id_counter
-            client_id_counter += 1
+        room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
+        welcome_msg = (
+            "Available rooms:\n" +
+            room_list +
+            "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
+        )
+        conn.send(welcome_msg.encode('utf-8'))
 
-        # Send welcome message FIRST
-        client_socket.sendall(f"{WELCOME_MESSAGE}\n".encode("utf-8"))
-        print(f"Sent welcome message to client {client_id} at {address}")
+        room_choice = conn.recv(1024).decode('utf-8').strip()
 
-        # Then send client ID
-        client_socket.sendall(f"{ID_PREFIX}{client_id}\n".encode("utf-8"))
-        print(f"Sent client ID: {client_id} to client at {address}")
+        if room_choice.startswith("NEW:"):
+            new_room_name = room_choice.split("NEW:")[-1].strip()
+            if not new_room_name:
+                conn.send(b"Invalid room name. Disconnecting.\n")
+                conn.close()
+                return
+            if new_room_name not in rooms:
+                rooms[new_room_name] = []
+            room_choice = new_room_name
 
-        while True:
-            line = client_socket_file.readline().strip()
-            if not line:
-                break
-
-            message = line.decode("utf-8")
-
-            # Room management commands
-            if message.startswith("NEW:"):
-                room_name = message.split("NEW:")[1]
-                if room_name in rooms:
-                    client_socket.sendall(f"Room '{room_name}' already exists!\n".encode("utf-8"))
-                else:
-                    rooms[room_name] = {}
-                    rooms[room_name][client_id] = client_socket
-                    current_room = room_name
-                    client_socket.sendall(f"Joined room: {room_name}\n".encode("utf-8"))
-
-            elif message == "LIST_ROOMS":
-                room_list = ",".join(rooms.keys())
-                client_socket.sendall(f"{room_list}\n".encode("utf-8"))
-
-            elif message in rooms:
-                if current_room:
-                    del rooms[current_room][client_id]
-                rooms[message][client_id] = client_socket
-                current_room = message
-                client_socket.sendall(f"Joined room: {message}\n".encode("utf-8"))
-
+        if room_choice not in rooms:
+            if room_choice == "":
+                conn.send(b"No room chosen. Disconnecting.\n")
             else:
-                client_socket.sendall(f"Unknown command or room: {message}\n".encode("utf-8"))
+                conn.send(f"Room '{room_choice}' does not exist. Disconnecting.\n".encode('utf-8'))
+            conn.close()
+            return
+
+        global client_id_counter
+        with client_lock:
+            client_id_counter += 1
+            this_client_id = client_id_counter
+
+        rooms[room_choice].append((conn, this_client_id))
+        conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
+        conn.send(f"ID:{this_client_id}\n".encode('utf-8'))
+
+        handle_client(conn, room_choice, this_client_id)
 
     except Exception as e:
-        print(f"Error with client {client_id} at {address}: {e}")
+        print("Error in handle_new_connection:", e)
+        conn.close()
+
+def handle_client(conn, room_name, client_id):
+    try:
+        while True:
+            data = conn.recv(4096)
+            if not data:
+                break
+
+            # Broadcast this audio data to everyone else in the room
+            with broadcast_lock:
+                for cl, cl_id in rooms[room_name]:
+                    if cl != conn:
+                        # Send the length-prefixed message:
+                        # First a line: "DATA:<client_id>:<length>\n"
+                        header = f"DATA:{client_id}:{len(data)}\n".encode('utf-8')
+                        cl.send(header + data)
+
+    except Exception as e:
+        print("Error or disconnection:", e)
     finally:
-        if current_room and client_id in rooms[current_room]:
-            del rooms[current_room][client_id]
-        client_socket.close()
-        print(f"Client {client_id} at {address} disconnected.")
-
-
+        if (conn, client_id) in rooms[room_name]:
+            rooms[room_name].remove((conn, client_id))
+        conn.close()
+        if len(rooms[room_name]) == 0:
+            del rooms[room_name]
+        print(f"Client {client_id} disconnected from room {room_name}")
 
 def server_listener():
     """Main server listener loop to accept new connections."""
@@ -104,7 +102,7 @@ def server_listener():
         try:
             client_socket, address = server_socket.accept()
             print(f"New connection from {address}")
-            threading.Thread(target=handle_client, args=(client_socket, address), daemon=True).start()
+            threading.Thread(target=handle_new_connection, args=(client_socket,), daemon=True).start()
         except Exception as e:
             print(f"Error accepting new connection: {e}")
 
