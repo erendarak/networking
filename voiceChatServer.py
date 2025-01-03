@@ -6,7 +6,7 @@ host = "0.0.0.0"  # Listen on all available interfaces
 port = 5000
 
 # Rooms and clients
-rooms = defaultdict(list)  # Room name -> List of (client_socket, client_id)
+rooms = defaultdict(list)  # Room name -> List of (client_socket, client_id, username)
 client_id_counter = 0
 client_lock = threading.Lock()
 broadcast_lock = threading.Lock()
@@ -20,9 +20,17 @@ WELCOME_MESSAGE = "Welcome to the Voice Chat Server! Available Commands:\n" \
 
 def handle_new_connection(conn):
     try:
+        # Step 1: Receive Username
+        conn.send(b"Please enter your username:\n")
+        username = conn.recv(1024).decode('utf-8').strip()
+        if not username:
+            conn.send(b"Invalid username. Disconnecting.\n")
+            conn.close()
+            return
+
         room_list = "\n".join(rooms.keys()) if rooms else "No rooms available."
         welcome_msg = (
-            "Available rooms:\n" +
+            f"Welcome, {username}!\nAvailable rooms:\n" +
             room_list +
             "\n\nType an existing room name to join it, or type 'NEW:<RoomName>' to create a new room:\n"
         )
@@ -53,17 +61,17 @@ def handle_new_connection(conn):
             client_id_counter += 1
             this_client_id = client_id_counter
 
-        rooms[room_choice].append((conn, this_client_id))
+        rooms[room_choice].append((conn, this_client_id, username))
         conn.send(f"Joined room: {room_choice}\n".encode('utf-8'))
         conn.send(f"ID:{this_client_id}\n".encode('utf-8'))
 
-        handle_client(conn, room_choice, this_client_id)
+        handle_client(conn, room_choice, this_client_id, username)
 
     except Exception as e:
         print("Error in handle_new_connection:", e)
         conn.close()
 
-def handle_client(conn, room_name, client_id):
+def handle_client(conn, room_name, client_id, username):
     try:
         while True:
             data = conn.recv(4096)
@@ -72,7 +80,7 @@ def handle_client(conn, room_name, client_id):
 
             # Broadcast this audio data to everyone else in the room
             with broadcast_lock:
-                for cl, cl_id in rooms[room_name]:
+                for cl, cl_id, cl_username in rooms[room_name]:
                     if cl != conn:
                         # Send the length-prefixed message:
                         # First a line: "DATA:<client_id>:<length>\n"
@@ -82,12 +90,12 @@ def handle_client(conn, room_name, client_id):
     except Exception as e:
         print("Error or disconnection:", e)
     finally:
-        if (conn, client_id) in rooms[room_name]:
-            rooms[room_name].remove((conn, client_id))
+        if (conn, client_id, username) in rooms[room_name]:
+            rooms[room_name].remove((conn, client_id, username))
         conn.close()
         if len(rooms[room_name]) == 0:
             del rooms[room_name]
-        print(f"Client {client_id} disconnected from room {room_name}")
+        print(f"Client {username} (ID: {client_id}) disconnected from room {room_name}")
 
 def server_listener():
     """Main server listener loop to accept new connections."""
